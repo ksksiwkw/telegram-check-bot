@@ -1,14 +1,12 @@
 """Complete bot, Python 3.11+. Virtual currency only.
 Requirements: aiogram>=3.20,<4 fastapi uvicorn geoip2
 Run: python main.py
-Environment: BOT_TOKEN, APP_SECRET (32+ characters), ADMIN_IDS,
+Env: BOT_TOKEN, APP_SECRET (32+ chars), ADMIN_IDS,
 PUBLIC_URL or RENDER_EXTERNAL_URL. Optional DB_PATH, GEOIP_DB, TRUST_PROXY.
-Use persistent SQLite storage; back up DB before upgrading.
-TRUST_PROXY=1 only for one trusted ingress appending the real client IP to XFF,
-with direct public access to this app blocked. Otherwise leave 0.
-Existing users, balances, games, rounds and logs retain their table names.
-Mines buttons contain only a custom emoji icon plus invisible required text.
-If custom emojis are rejected, one ordinary emoji is used as fallback.
+Use persistent SQLite and back up DB. Existing table names are retained.
+Daily bonus: 5000 every 86400 seconds (rolling cooldown, server time).
+TRUST_PROXY=1 only for ONE trusted ingress appending actual IP to XFF,
+with direct access to application blocked. Otherwise leave 0.
 """
 import asyncio, hashlib, hmac, html, ipaddress, json, logging, math, os, re, secrets, sqlite3, time
 from contextlib import contextmanager, asynccontextmanager
@@ -33,6 +31,7 @@ ADMINS={int(x.strip()) for x in os.environ['ADMIN_IDS'].split(',') if x.strip()}
 DB=os.getenv('DB_PATH','bot.sqlite3'); GEO=os.getenv('GEOIP_DB',''); TRUST=os.getenv('TRUST_PROXY','0')=='1'
 HOOK=hmac.new(SECRET.encode(),b'telegram-webhook',hashlib.sha256).hexdigest()
 MAX_BET=10**9; MAX_BAL=9*10**15; MAX_PAY=10**12
+BONUS_AMOUNT=5000; BONUS_SECONDS=86400
 bot=Bot(TOKEN,default=DefaultBotProperties(parse_mode='HTML')); dp=Dispatcher(); waiting={}; BOT_USERNAME=''
 
 @contextmanager
@@ -45,7 +44,7 @@ def db():
   c.rollback(); raise
  finally: c.close()
 
-E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5258258882022612173','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5388988070081082206','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012634003113252087','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934'}
+E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5258258882022612173','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5388988070081082206','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012634003113252087','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978'}
 ICON_FALLBACK={E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥'}
 INVISIBLE='\u200b'
 def esc(s): return html.escape(str(s))
@@ -64,32 +63,16 @@ def b(text,data=None,icon=None,style=None,url=None):
  return InlineKeyboardButton(text=text,**kw)
 def kb(rows): return InlineKeyboardMarkup(inline_keyboard=rows)
 def visible_len(text):
- plain=html.unescape(re.sub(r'<[^>]*>','',text))
- return len(plain.encode('utf-16-le'))//2
-
-def block_chunks(header,lines):
- prefix=header+'\n\n<blockquote><b>'; suffix='</b></blockquote>'
- current=[]; used=visible_len(prefix+suffix)
- for line in lines:
-  cost=visible_len(line)+(1 if current else 0)
-  if used+cost>4096 and current:
-   yield prefix+'\n'.join(current)+suffix
-   current=[]; used=visible_len(prefix+suffix); cost=visible_len(line)
-  if used+cost>4096: raise ValueError('Одна строка превышает лимит Telegram')
-  current.append(line); used+=cost
- if current: yield prefix+'\n'.join(current)+suffix
+ return len(html.unescape(re.sub(r'<[^>]*>','',text)).encode('utf-16-le'))//2
 
 def plain_markup(keys):
  if not keys: return None
- data=keys.model_dump(exclude_none=True)
- for row in data['inline_keyboard']:
+ d=keys.model_dump(exclude_none=True)
+ for row in d['inline_keyboard']:
   for item in row:
-   item.pop('style',None)
-   icon=item.pop('icon_custom_emoji_id',None)
-   if item.get('text')==INVISIBLE:
-    item['text']=ICON_FALLBACK.get(icon,'•')
- return InlineKeyboardMarkup.model_validate(data)
-
+   item.pop('style',None); icon=item.pop('icon_custom_emoji_id',None)
+   if item.get('text')==INVISIBLE: item['text']=ICON_FALLBACK.get(icon,'•')
+ return InlineKeyboardMarkup.model_validate(d)
 async def out(m,text,keys=None,edit=False):
  method=m.edit_text if edit else m.answer
  async def send(body,markup):
@@ -101,7 +84,6 @@ async def out(m,text,keys=None,edit=False):
  try: return await send(text,keys)
  except TelegramBadRequest as exc:
   if 'message is not modified' in str(exc).lower(): return
-  # Preserve the same message boundaries; no fragmentation by emoji count.
   plain=re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>',r'\1',text)
   try: return await send(plain,plain_markup(keys))
   except TelegramBadRequest as retry:
@@ -138,6 +120,8 @@ def init():
   CREATE TABLE IF NOT EXISTS command9(chat INTEGER,msg INTEGER,PRIMARY KEY(chat,msg));
   CREATE TABLE IF NOT EXISTS mines_v1(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER NOT NULL,bet INTEGER NOT NULL,mine_count INTEGER NOT NULL CHECK(mine_count BETWEEN 1 AND 24),mine_mask INTEGER NOT NULL,opened_mask INTEGER NOT NULL DEFAULT 0,hit INTEGER,state TEXT NOT NULL DEFAULT 'active',rev INTEGER NOT NULL DEFAULT 0,cents INTEGER NOT NULL DEFAULT 100,payout INTEGER NOT NULL DEFAULT 0,chat INTEGER NOT NULL,msg INTEGER NOT NULL,created INTEGER NOT NULL,UNIQUE(chat,msg));
   CREATE UNIQUE INDEX IF NOT EXISTS mines_active_v1 ON mines_v1(uid) WHERE state='active';
+  CREATE TABLE IF NOT EXISTS daily_bonus_v1(uid INTEGER PRIMARY KEY,last_claim INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS balance_top_v1 ON balances(amount DESC,uid);
   ''')
   for r in c.execute("SELECT id,mult FROM app_hilo_v6 WHERE state='active'").fetchall():
    c.execute('UPDATE app_hilo_v6 SET mult=? WHERE id=?',(num(r['mult']),r['id']))
@@ -161,7 +145,6 @@ def change(c,uid,delta):
  if value<0: raise ValueError('Недостаточно средств')
  if value>MAX_BAL: raise ValueError('Превышен лимит баланса. Обратись к администратору.')
  c.execute('UPDATE balances SET amount=? WHERE uid=?',(value,uid)); return value
-
 def once(c,m):
  if c.execute('SELECT 1 FROM command9 WHERE chat=? AND msg=?',(m.chat.id,m.message_id)).fetchone(): raise ValueError('Команда уже обработана.')
  c.execute('INSERT INTO command9 VALUES(?,?)',(m.chat.id,m.message_id))
@@ -182,8 +165,7 @@ class VerificationMiddleware(BaseMiddleware):
   private=(isinstance(event,Message) and event.chat.type=='private') or (isinstance(event,CallbackQuery) and isinstance(event.message,Message) and event.message.chat.type=='private')
   cmd=''
   if isinstance(event,Message) and event.text:
-   parts=event.text.split(maxsplit=1)
-   cmd=parts[0].split('@')[0].lower() if parts else ''
+   p=event.text.split(maxsplit=1); cmd=p[0].split('@')[0].lower() if p else ''
   appeal_exception=private and s=='failed' and cmd in ('/appeal','/оспорить')
   admin_exception=private and user.id in ADMINS and (cmd in ('/panel','/панель','/ban','/unban','/recheck','/cancel') or isinstance(event,Message) and user.id in waiting or isinstance(event,CallbackQuery) and (event.data or '').startswith('adm:'))
   if s=='passed' or appeal_exception or admin_exception: return await handler(event,data)
@@ -192,13 +174,11 @@ class VerificationMiddleware(BaseMiddleware):
   if not isinstance(message,Message): return
   if s=='pending': await out(message,CHECK_TEXT,verify_keyboard(private))
   else: await out(message,BLOCKED)
-
-dp.message.middleware(VerificationMiddleware())
-dp.callback_query.middleware(VerificationMiddleware())
+dp.message.middleware(VerificationMiddleware()); dp.callback_query.middleware(VerificationMiddleware())
 
 WELCOME='<b>'+em('5447195541345706844','👋')+' Добро пожаловать!\n\n'+em('5888584382553265934','🛡')+' Здесь вы пройдёте проверку на мульти-акк (твинк)</b>'
 def menu(private=True):
- rows=[[b('Профиль','profile','5771887475421090729'),b('Топ','top','5913384919584741274')],[b('Игры','games:menu','crown'),b('Помощь','help:menu','help')]]
+ rows=[[b('Профиль','profile','5771887475421090729'),b('Топ','top','5913384919584741274')],[b('Игры','games:menu','crown'),b('Помощь','help:menu','clip')]]
  if private: rows.append([b('Проверка',icon='check',url=URL)])
  return kb(rows)
 @dp.message(CommandStart())
@@ -212,30 +192,28 @@ async def navigation(q:CallbackQuery):
   text='<b>• Профиль</b>\n\n<blockquote><b>'+em('5771887475421090729','👤')+' Ник: '+esc(q.from_user.full_name)+'\n'+em('5936017305585586269','🆔')+' ID: </b><code>'+str(q.from_user.id)+'</code>\n<b>'+em('ok','✅')+' Статус: Проверка пройдена</b></blockquote>'
  else:
   with db() as c: rows=c.execute("SELECT * FROM users WHERE status='passed' ORDER BY checked_at DESC LIMIT 10").fetchall()
-  text='<b>• Топ</b>\n\n<blockquote><b>'+('\n'.join(em('5879770735999717115','🏆')+' '+link(r['id'],r['name'][:60])+' — проверка пройдена' for r in rows) or 'Пока никого нет.')+'</b></blockquote>'
+  text='<b>• Топ прошедших проверку</b>\n\n<blockquote><b>'+('\n'.join(em('5879770735999717115','🏆')+' '+link(r['id'],r['name'][:60])+' — проверка пройдена' for r in rows) or 'Пока никого нет.')+'</b></blockquote>'
  await out(q.message,text,kb([[b('Назад','home','5875082500023258804')]]),True)
 
-def help_text(uid):
- text='<b>'+em('help','📚')+' Помощь</b>\n\n<blockquote><code>/start</code><b> — главное меню.</b>\n<code>б</code><b> — баланс бубликов.</b>\n<code>помощь</code><b> или </b><code>/help</code><b> — основные команды.</b>\n<code>игры</code><b> или </b><code>/games</code><b> — меню с правилами игр.</b>\n<code>/appeal объяснение</code><b> — обжаловать блокировку.</b></blockquote>\n\n<b>Профиль, топ и проверка доступны кнопками в меню. Валюта виртуальная, без вывода денег.</b>'
- if uid in ADMINS:
-  text+='\n\n<b>'+em('chart','⚙️')+' Администратору</b>\n<blockquote><code>/panel</code><b> — панель, логи и апелляции.</b>\n<code>/ban ID причина</code><b> — бан.</b>\n<code>/unban ID</code><b> — снять бан.</b>\n<code>/recheck ID</code><b> — повторная проверка.</b>\n<code>/give ID сумма</code><b> — выдать бублики.</b>\n<code>/take ID сумма</code><b> — списать бублики.</b>\n<code>/give сумма</code><b> и </b><code>/take сумма</code><b> — ответом на сообщение игрока.</b>\n<code>/cancel</code><b> — отменить ввод в админке.</b></blockquote>'
- return text
-def games_keyboard(): return kb([[b('Хило','games:hilo','5447327564345416222')],[b('Мины','games:mines','mine_start')],[b('Рулетка','games:roulette','crown')],[b('Главное меню','home','5875082500023258804')]])
+# Help: requested compact layout, without admin commands.
+def help_text(uid=None):
+ return '<b>'+em('clip','📎')+' Помощь</b>\n\n<blockquote>'+em('check','⚙')+' <code>/start</code><b> — запустить бота/главное меню</b>\n'+em('chat','💬')+' <code>б</code><b> — отобразить баланс</b>\n'+em('notice','❗️')+' <code>помощь</code><b> / </b><code>игры</code><b> — навигация</b>\n'+em('pin','📌')+' <code>/appeal</code><b> — апелляция на бан в боте</b>\n'+em('bonusgift','🎁')+' <code>бонус</code><b> — получить доп. валюту</b>\n'+em('map','🗺')+' <code>топ б</code><b> — топеры в боте по балансу</b></blockquote>'
+def games_keyboard(): return kb([[b('Хило','games:hilo','5447327564345416222')],[b('Мины','games:mines','mine_start')],[b('Рулетка','games:roulette','wheel')],[b('Главное меню','home','5875082500023258804')]])
 GAME_RULES={
-'hilo':'<b>'+em('5447327564345416222','🎴')+' Хило</b>\n\n<blockquote><code>хл 100</code><b> или </b><code>хило 100</code><b> — начать со ставкой 100.</b>\n<code>хл</code><b> — продолжить активную игру.</b></blockquote>\n\n<b>Угадай, будет следующая карта выше или ниже. A — 1, J — 11, Q — 12, K — 13. Равная карта означает проигрыш. Карты выбираются независимо. Коэффициент зависит от текущей карты, общий множитель округляется вниз до сотых. После успешного хода можно забрать ставку × текущий множитель.</b>\n\n<b>Минимум: 10. Максимальная ставка: '+fmt(MAX_BET)+'. Лимит выплаты: '+fmt(MAX_PAY)+'.</b>',
-'mines':'<b>'+em('mine_start','💣')+' Мины</b>\n\n<blockquote><code>мины 100 2</code><b> — ставка 100, две мины.</b>\n<code>мины</code><b> — продолжить без повторного списания.</b></blockquote>\n\n<b>Поле 5×5, от 1 до 24 мин. 💎 — безопасная клетка, 💣 — проигрыш ставки. После первого безопасного хода можно забрать выигрыш. Даже первая клетка может оказаться миной. Чем больше мин и открытых клеток, тем выше коэффициент. Все безопасные клетки открыты — автоматическая выплата. Счётчик 💎 показывает оставшиеся закрытые безопасные клетки.</b>\n\n<blockquote><b>Множитель: </b><code>0.95 × C(25,k) / C(25−m,k)</code><b>, округление до сотых. При одной мине первый ход ×0.99.</b></blockquote>\n\n<b>Минимум: 10. Максимальная ставка: '+fmt(MAX_BET)+'. Лимит выплаты: '+fmt(MAX_PAY)+'.</b>',
-'roulette':'<b>'+em('crown','👑')+' Рулетка</b>\n\n<blockquote><code>100 к ч одд евен 0 9-29</code><b> — шесть отдельных ставок по 100.</b>\n<code>ставки</code><b> — текущие ставки.</b>\n<code>отмена</code><b> — отменить ваши ставки до запуска с возвратом.</b>\n<code>го</code><b> — запуск через 13 секунд после последней принятой ставки.</b>\n<code>лог</code><b> — последние 10 чисел.</b></blockquote>\n\n<b>К / красный, Ч / чёрный, чет / EVEN / евен, нечет / ODD / одд: ×1.98. Число 0–36: ×35.98. З / зелёный — 0. Диапазоны 1–18 и 19–36: ×1.98. Остальные диапазоны: 35.98 / количество чисел, округление вниз до сотых. Ноль не выигрывает на чёт/нечёт, красном или чёрном.</b>\n\n<b>До 150 ставок в сообщении; повторы разрешены. При нехватке средств ставки принимаются по порядку, остальные отклоняются. Неверный тип — всё сообщение игнорируется. Выплата включает ставку. Повтор/удвоение относятся к вашим ставкам последнего раунда. У каждого чата и темы свой раунд.</b>'}
+'hilo':'<b>'+em('5447327564345416222','🎴')+' Хило | Help game</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>хило [ставка]</code>\n\n<b>'+em('search','🔍')+' Главная задача в карточной игре HiLo — угадать следующую карту: будет она выше текущей или ниже?\nЕсли вы угадаете, вы можете забрать выигрыш или продолжить.</b>',
+'roulette':'<b>'+em('wheel','🎡')+' Рулетка | Help games</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>[сумма] [тип ставки]</code>\n\n<b>'+em('down','⬇️')+' Типы ставок:</b>\n'+em('gear','⚙️')+' <code>к | ч</code><b> — x1.98</b>\n'+em('gear','⚙️')+' <code>одд | евен</code><b> — x1.98</b>\n'+em('gear','⚙️')+' <code>0–36</code><b> (одно число) — x35.98</b>\n'+em('gear','⚙️')+' <code>1-18 | 19-36</code><b> — x1.98</b>',
+'mines':'<b>'+em('mine_start','💣')+' Мины | Help games</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>мины [сумма] [кол-во]</code>\n\n<b>'+em('search','🔍')+' Главная задача — не подорваться на мине и забрать главный приз.</b>'}
 GAMES_TITLE='<b>'+em('crown','🎮')+' Игры</b>\n\n<blockquote><b>Выбери игру, чтобы посмотреть правила и команды.</b></blockquote>'
 @dp.message(Command('help','помощь'))
 @dp.message(F.text.regexp(r'(?i)^\s*помощь\s*$'))
-async def help_command(m:Message): await out(m,help_text(m.from_user.id),kb([[b('Игры','games:menu','crown')]]))
+async def help_command(m:Message): await out(m,help_text(),kb([[b('Игры','games:menu','crown')]]))
 @dp.message(Command('games','игры'))
 @dp.message(F.text.regexp(r'(?i)^\s*игры\s*$'))
 async def games_command(m:Message): await out(m,GAMES_TITLE,games_keyboard())
 @dp.callback_query(F.data=='help:menu')
 async def help_callback(q:CallbackQuery):
  await q.answer()
- if isinstance(q.message,Message): await out(q.message,help_text(q.from_user.id),kb([[b('Назад','home','5875082500023258804')]]),True)
+ if isinstance(q.message,Message): await out(q.message,help_text(),kb([[b('Назад','home','5875082500023258804')]]),True)
 @dp.callback_query(F.data.startswith('games:'))
 async def games_callback(q:CallbackQuery):
  await q.answer()
@@ -244,7 +222,43 @@ async def games_callback(q:CallbackQuery):
  if key=='menu': await out(q.message,GAMES_TITLE,games_keyboard(),True)
  elif key in GAME_RULES: await out(q.message,GAME_RULES[key],kb([[b('Назад к играм','games:menu','5875082500023258804')]]),True)
 
-# Administration: recovery access remains available without playing privileges.
+# Bonus: one global cooldown per account, across all chats and restarts.
+def claim_bonus(uid):
+ now=int(time.time())
+ with db() as c:
+  c.execute('BEGIN IMMEDIATE'); allowed(c,uid)
+  old=c.execute('SELECT last_claim FROM daily_bonus_v1 WHERE uid=?',(uid,)).fetchone()
+  if old and now<old['last_claim']+BONUS_SECONDS:
+   return False,old['last_claim']+BONUS_SECONDS-now
+  change(c,uid,BONUS_AMOUNT)
+  c.execute('INSERT INTO daily_bonus_v1(uid,last_claim) VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET last_claim=excluded.last_claim',(uid,now))
+  c.execute('INSERT INTO app_audit_v6(actor,uid,ts,action) VALUES(?,?,?,?)',(uid,uid,now,f'daily_bonus +{BONUS_AMOUNT}'))
+ return True,0
+@dp.message(Command('bonus','бонус'))
+@dp.message(F.text.regexp(r'(?i)^\s*бонус\s*$'))
+async def bonus(m:Message):
+ try: paid,left=claim_bonus(m.from_user.id)
+ except ValueError as e: await out(m,error_text(e)); return
+ if paid:
+  await out(m,'<b>'+em('bonus','🎁')+' Ежедневный бонус</b>\n\n<blockquote><code>+5 000</code><b> бубликов</b></blockquote>')
+ else:
+  hours,left=divmod(left,3600); minutes,seconds=divmod(left,60)
+  await out(m,'<b>'+em('clock','⏲')+f' Подождите еще {hours}ч{minutes:02d}м{seconds:02d}с чтобы получить бонус еще раз</b>')
+@dp.message(F.text.regexp(r'(?i)^\s*топ\s+б\s*$'))
+async def top_balance(m:Message):
+ uid=m.from_user.id
+ with db() as c:
+  rows=c.execute("SELECT u.id,u.name,b.amount FROM users u JOIN balances b ON b.uid=u.id WHERE u.status='passed' ORDER BY b.amount DESC,u.id ASC LIMIT 10").fetchall()
+  mine=balance(c,uid)
+  rank=c.execute("SELECT count(*)+1 FROM balances b JOIN users u ON u.id=b.uid WHERE u.status='passed' AND (b.amount>? OR (b.amount=? AND b.uid<?))",(mine,mine,uid)).fetchone()[0]
+ lines=[]
+ for i,r in enumerate(rows,1):
+  medal=('🥇','🥈','🥉')[i-1] if i<=3 else f'{i}.'
+  lines.append(f'<b>{medal} {link(r["id"],r["name"][:55])}</b>\n'+em('money','🥯')+' <code>'+fmt(r['amount'])+'</code><b> бубликов</b>')
+ text='<b>'+em('map','🗺')+' Топ по балансу</b>\n\n<blockquote>'+('\n\n'.join(lines) or '<b>Пока никого нет.</b>')+'</blockquote>\n\n<b>'+em('face','👤')+f' Ваше место: {rank}\n'+em('money','🥯')+' Ваш баланс: </b><code>'+fmt(mine)+'</code><b> бубликов</b>'
+ await out(m,text)
+
+# Admin panel. Recovery moderation and appeals remain available when blocked.
 def admin(m): return valid_user(m) and m.chat.type=='private' and m.from_user.id in ADMINS
 async def admin_callback(q):
  ok=q.from_user.id in ADMINS and isinstance(q.message,Message) and q.message.chat.type=='private'
@@ -253,7 +267,7 @@ async def admin_callback(q):
 async def panel(m:Message):
  if not admin(m): return
  waiting.pop(m.from_user.id,None)
- await out(m,'<b>Панель администратора</b>',kb([[b('Логи','adm:logs:0')],[b('Апелляции','adm:appeals:0')],[b('Бан','adm:input:ban'),b('Разбан','adm:input:unban')],[b('Повторная проверка','adm:input:recheck')]]))
+ await out(m,'<b>Панель администратора</b>\n<blockquote><code>/give ID сумма</code><b> — выдать</b>\n<code>/take ID сумма</code><b> — списать</b>\n<code>/ban ID причина</code>\n<code>/unban ID</code>\n<code>/recheck ID</code></blockquote>',kb([[b('Логи','adm:logs:0')],[b('Апелляции','adm:appeals:0')],[b('Бан','adm:input:ban'),b('Разбан','adm:input:unban')],[b('Повторная проверка','adm:input:recheck')]]))
 def moderate(actor,uid,action,reason):
  with db() as c:
   c.execute('BEGIN IMMEDIATE')
@@ -338,7 +352,7 @@ async def appeal(m:Message):
  if error: await out(m,error_text(error)); return
  await out(m,'<b>Апелляция сохранена.</b>'); await notify(f'<b>Апелляция ID {uid}\n{esc(body)}</b>',appealkeys(aid))
 
-# Balance.
+# Balance commands.
 @dp.message(F.text.regexp(r'(?i)^\s*б\s*$'))
 async def bal(m:Message):
  with db() as c: value=balance(c,m.from_user.id)
@@ -360,7 +374,7 @@ async def give(m:Message):
  except ValueError as e: await out(m,error_text(e)); return
  await out(m,f'<b>{em("money","🥯")} ID {uid}\nИзменение: {delta:+}\nБаланс: {fmt(value)}</b>')
 
-# Hi-Lo: two-decimal cumulative multipliers, cards A/J/Q/K.
+# Hi-Lo.
 def card(n): return {1:'A',11:'J',12:'Q',13:'K'}.get(n,str(n))
 def rate(n,d):
  count=n-1 if d=='low' else 13-n
@@ -423,7 +437,7 @@ async def hilo_step(q:CallbackQuery):
   if isinstance(q.message,Message): await out(q.message,text,keys,True)
  except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
 
-# Mines. Secret immutable board, server-side ownership, revision and payout checks.
+# Mines: randomly generated immutable board; cents rounded half-up exactly.
 def mines_cents(count,opened,bet):
  if opened==0: return 100
  numerator=95*math.comb(25,opened); denominator=math.comb(25-count,opened)
@@ -434,9 +448,7 @@ def cents_text(cents):
  whole,part=divmod(cents,100)
  return f'{whole}.{part:02d}'.rstrip('0').rstrip('.')
 def mine_value(g): return min(MAX_PAY,g['bet']*g['cents']//100)
-
 MINES_HELP='<b>'+em('flag','🏳️')+' Мины [ставка] [кол-во мин]\n'+em('bulb','💡')+' Задача и смысл игры выбрать как можно больше безопасных клеток и не подорваться на минах</b>'
-
 def mineview(g):
  opened=g['opened_mask'].bit_count(); mult=cents_text(g['cents'])
  if g['state']=='lost': text='<b>'+em('lose_mine','💥')+' Проигрыш. Подорвался…</b>\n\n<blockquote><b>'+em('diamond','💎')+' Проигрыш: </b><code>'+fmt(g['bet'])+'</code><b> бубликов</b></blockquote>'
@@ -453,12 +465,10 @@ def mineview(g):
    elif opened_cell: icon='diamond'
    else: icon='question'
    action='noop' if terminal or opened_cell else str(cell)
-   # Only one visible glyph: custom emoji icon, no ordinary duplicate text.
    row.append(b(INVISIBLE,f'mn:{g["id"]}:{g["rev"]}:{action}',icon))
   rows.append(row)
  if g['state']=='active' and opened: rows.append([b('Забрать выигрыш',f'mn:{g["id"]}:{g["rev"]}:cash','box','primary')])
  return text,kb(rows)
-
 def create_mines(uid,bet,count,chat,msg):
  with db() as c:
   c.execute('BEGIN IMMEDIATE'); allowed(c,uid)
@@ -472,7 +482,6 @@ def create_mines(uid,bet,count,chat,msg):
 @dp.message(F.text.regexp(r'(?i)^\s*мины(?:\s.*)?$'))
 async def mines(m:Message):
  uid=m.from_user.id; p=m.text.split()
- # Invalid syntax always produces the exact two-line help, even during a game.
  if len(p)!=1:
   if len(p)!=3 or not re.fullmatch(r'-?\d{1,12}',p[1]) or not re.fullmatch(r'\d{1,2}',p[2]): await out(m,MINES_HELP); return
   bet=int(p[1]); count=int(p[2])
@@ -555,9 +564,37 @@ def place_partial(c,r,uid,name,bets):
   c.execute('UPDATE r_round9 SET last=? WHERE id=?',(time.time(),r['id']))
  return report,len(accepted)
 
+# Accepted rows are quoted. Rejected rows are ALWAYS outside blockquote.
+# Fill each message to 4096 visible UTF-16 units; do not split every N rows.
+def render_report_rows(rows):
+ text='<b>'+em('fire','🔥')+' Ставки приняты:</b>\n\n'
+ in_quote=False; first=True
+ for accepted,line in rows:
+  if accepted:
+   if not in_quote:
+    if not first: text+='\n\n'
+    text+='<blockquote><b>'; in_quote=True
+   else: text+='\n'
+   text+=line
+  else:
+   if in_quote: text+='</b></blockquote>'; in_quote=False
+   if not first: text+='\n\n' if rows and first is False else '\n'
+   text+='<b>'+line+'</b>'
+  first=False
+ if in_quote: text+='</b></blockquote>'
+ return text
 async def report_bets(m,report):
- lines=[em('face','😀')+fmt(amount)+' на '+label(kind) if ok else em('error','❗')+' '+fmt(amount)+' на '+label(kind)+' — '+esc(why) for amount,kind,ok,why in report]
- for text in block_chunks('<b>'+em('fire','🔥')+' Ставки приняты:</b>',lines): await out(m,text)
+ accepted=[]; rejected=[]
+ for amount,kind,ok,why in report:
+  if ok: accepted.append((True,em('face','😀')+fmt(amount)+' на '+label(kind)))
+  else: rejected.append((False,em('error','❗')+' '+fmt(amount)+' на '+label(kind)+' — '+esc(why)))
+ current=[]
+ for row in accepted+rejected:
+  trial=current+[row]
+  if current and visible_len(render_report_rows(trial))>4096:
+   await out(m,render_report_rows(current)); current=[row]
+  else: current=trial
+ if current: await out(m,render_report_rows(current))
 
 def bet_filter(m):
  p=(m.text or '').split()
@@ -584,7 +621,6 @@ def repeatkeys(rid,nav=None):
  rows=[]
  if nav: rows.append(nav)
  rows.append([b('Повторить ставку',f'rr:{rid}:1','repeat'),b('Удвоить ставку',f'rr:{rid}:2','double')]); return kb(rows)
-
 def result_view(rid,page,chat,thread):
  with db() as c:
   r=c.execute("SELECT * FROM r_round9 WHERE id=? AND state='done' AND chat=? AND thread=?",(rid,chat,thread)).fetchone()
@@ -598,7 +634,6 @@ def result_view(rid,page,chat,thread):
  if page: nav.append(b('←',f'rpage:{rid}:{page-1}'))
  if (page+1)*5<total: nav.append(b('→',f'rpage:{rid}:{page+1}'))
  return text,repeatkeys(rid,nav)
-
 @dp.message(F.text.regexp(r'(?i)^\s*(го|лог|отмена|ставки)\s*$'))
 async def roulette(m:Message):
  uid=m.from_user.id; cmd=m.text.strip().lower(); thread=m.message_thread_id or 0
@@ -615,8 +650,7 @@ async def roulette(m:Message):
    if cmd=='отмена':
     total=c.execute("SELECT coalesce(sum(amount),0) FROM r_bet9 WHERE rid=? AND uid=? AND state='active'",(r['id'],uid)).fetchone()[0]
     if total:
-     change(c,uid,total)
-     c.execute("UPDATE r_bet9 SET state='cancelled' WHERE rid=? AND uid=? AND state='active'",(r['id'],uid))
+     change(c,uid,total); c.execute("UPDATE r_bet9 SET state='cancelled' WHERE rid=? AND uid=? AND state='active'",(r['id'],uid))
     text='<b>'+em('repeat','🔄')+f' Ставки отменены. Возвращено {fmt(total)} бубликов.</b>'
    else:
     rows=c.execute("SELECT * FROM r_bet9 WHERE rid=? AND state='active'",(r['id'],)).fetchall()
@@ -634,7 +668,6 @@ async def roulette(m:Message):
   else: text,keys=result_view(r['id'],0,m.chat.id,thread); await out(m,text,keys)
  except ValueError as e:
   text=str(e); await out(m,'<b>'+em('clock','⏲')+' '+esc(text)+'</b>' if text.startswith('Подождите') else error_text(text))
-
 def own_bets(rid,uid,page,chat,thread):
  with db() as c:
   r=c.execute("SELECT id FROM r_round9 WHERE id=? AND chat=? AND thread=? AND state='open'",(rid,chat,thread)).fetchone()
@@ -684,7 +717,7 @@ async def repeat_bets(q:CallbackQuery):
   await q.answer('Ставки обработаны'); await report_bets(q.message,report)
  except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
 
-# Web verification. No games in Mini App. No response to unknown chat messages.
+# Verification. Final status cannot be rechecked without admin reset.
 def validate(raw):
  try:
   if not isinstance(raw,str) or len(raw)>16384: raise ValueError()
@@ -753,7 +786,7 @@ def check_user(uid,name,ip,fp,device,region,platform,api):
   row=dict(c.execute('SELECT * FROM app_checks_v6 WHERE id=?',(rid,)).fetchone())
  return result,row
 
-PAGE=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://telegram.org/js/telegram-web-app.js"></script><title>Проверка</title><style>body{margin:0;background:var(--tg-theme-bg-color,#101522);color:var(--tg-theme-text-color,#fff);font:16px system-ui;padding:24px}main{max-width:480px;margin:60px auto}h1{font-size:25px}button{width:100%;padding:17px;border:0;border-radius:14px;background:var(--tg-theme-button-color,#6274ff);color:white;font-size:17px;font-weight:bold;margin-top:20px}button:disabled{opacity:.5}#result{font-size:22px;font-weight:700;white-space:pre-wrap}details{font-size:12px;margin-top:20px;opacity:.8}[hidden]{display:none!important}</style></head><body><main><section id="form" hidden><h1>🧹 Пройти проверку на твинк.</h1><button id="verify">Пройти проверку</button><details><summary>Данные и условия проверки</summary><p>Нажимая кнопку, вы соглашаетесь на обработку Telegram ID, имени, IP, характеристик устройства, приблизительного отпечатка и города по IP. Логи хранятся до 90 дней, доступны администрации и отправляются ей в Telegram. Копии сообщений у администраторов автоматически не удаляются. Профиль, баланс, история игр и блокировки сохраняются до удаления владельцем. Имя и ссылка прошедшего проверку публикуются в топе.</p><p>Совпадение IP или характеристик с другим прошедшим аккаунтом приводит к автобану. Общий Wi-Fi/VPN и одинаковые телефоны могут давать ложные совпадения. Это не аппаратный ID, не точная модель и не GPS. Обжалование и запрос удаления: /appeal объяснение.</p></details></section><div id="result">Загрузка…</div><button id="retry" hidden>Повторить загрузку</button><button id="close" hidden>Вернуться в бот</button></main><script>
+PAGE=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://telegram.org/js/telegram-web-app.js"></script><title>Проверка</title><style>body{margin:0;background:var(--tg-theme-bg-color,#101522);color:var(--tg-theme-text-color,#fff);font:16px system-ui;padding:24px}main{max-width:480px;margin:60px auto}h1{font-size:25px}button{width:100%;padding:17px;border:0;border-radius:14px;background:var(--tg-theme-button-color,#6274ff);color:white;font-size:17px;font-weight:bold;margin-top:20px}button:disabled{opacity:.5}#result{font-size:22px;font-weight:700;white-space:pre-wrap}details{font-size:12px;margin-top:20px;opacity:.8}[hidden]{display:none!important}</style></head><body><main><section id="form" hidden><h1>🧹 Пройти проверку на твинк.</h1><button id="verify">Пройти проверку</button><details><summary>Данные и условия проверки</summary><p>Нажимая кнопку, вы соглашаетесь на обработку Telegram ID, имени, IP, характеристик устройства, приблизительного отпечатка и города по IP. Логи хранятся до 90 дней, доступны администрации и отправляются ей в Telegram. Копии сообщений у администраторов автоматически не удаляются. Профиль, баланс, бонусы, история игр и блокировки сохраняются до удаления владельцем. Имя и ссылка прошедшего проверку публикуются в топах, баланс — в топе балансов.</p><p>Совпадение IP или характеристик с другим прошедшим аккаунтом приводит к автобану. Общий Wi-Fi/VPN и одинаковые телефоны могут давать ложные совпадения. Это не аппаратный ID, не точная модель и не GPS. Обжалование и запрос удаления: /appeal объяснение.</p></details></section><div id="result">Загрузка…</div><button id="retry" hidden>Повторить загрузку</button><button id="close" hidden>Вернуться в бот</button></main><script>
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
 const f=document.getElementById('form'),r=document.getElementById('result'),b=document.getElementById('verify'),retry=document.getElementById('retry'),closeBtn=document.getElementById('close');closeBtn.onclick=()=>tg?.close();
 async function api(path,extra={}){if(!tg?.initData)throw Error('Открой приложение из бота.');const x=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({init_data:tg.initData,...extra})});const d=await x.json();if(!x.ok)throw Error(d.detail||'Ошибка сервера');return d;}
@@ -766,8 +799,7 @@ b.onclick=async()=>{b.disabled=true;try{let h={};try{h=await navigator.userAgent
 @asynccontextmanager
 async def lifespan(app):
  global BOT_USERNAME
- init()
- me=await bot.get_me(); BOT_USERNAME=me.username or ''
+ init(); me=await bot.get_me(); BOT_USERNAME=me.username or ''
  await bot.set_webhook(URL+'/telegram/webhook',secret_token=HOOK,allowed_updates=dp.resolve_used_update_types())
  try: yield
  finally: await bot.session.close()
