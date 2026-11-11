@@ -20,8 +20,7 @@ import secrets
 import sqlite3
 import time
 from contextlib import contextmanager, asynccontextmanager
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
-from zoneinfo import ZoneInfo
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -86,6 +85,44 @@ def init_db():
         CREATE TABLE IF NOT EXISTS app_ops_v6(id INTEGER PRIMARY KEY AUTOINCREMENT,chat INTEGER,msg INTEGER,actor INTEGER,uid INTEGER,delta INTEGER,amount INTEGER,ts INTEGER,UNIQUE(chat,msg));
         CREATE TABLE IF NOT EXISTS app_hilo_v6(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER NOT NULL,bet INTEGER NOT NULL,card INTEGER NOT NULL,mult TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'active',rev INTEGER NOT NULL DEFAULT 0,wins INTEGER NOT NULL DEFAULT 0,payout INTEGER NOT NULL DEFAULT 0,chat INTEGER NOT NULL,msg INTEGER NOT NULL,UNIQUE(chat,msg));
         CREATE UNIQUE INDEX IF NOT EXISTS app_hilo_one_active_v6 ON app_hilo_v6(uid) WHERE state='active';
+        CREATE TABLE IF NOT EXISTS roulette_rounds_v1(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'open',
+            created_at INTEGER NOT NULL,
+            last_bet_at INTEGER NOT NULL,
+            result_number INTEGER,
+            result_color TEXT
+        );
+        CREATE INDEX IF NOT EXISTS roulette_rounds_chat_state_v1 ON roulette_rounds_v1(chat,state,id);
+        CREATE TABLE IF NOT EXISTS roulette_bets_v1(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_id INTEGER NOT NULL,
+            uid INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            bet_type TEXT NOT NULL,
+            selection TEXT NOT NULL,
+            label TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            multiplier TEXT NOT NULL,
+            payout INTEGER NOT NULL DEFAULT 0,
+            won INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'active',
+            created_at INTEGER NOT NULL,
+            source_chat INTEGER NOT NULL,
+            source_msg INTEGER NOT NULL,
+            source_index INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(source_chat,source_msg,source_index,uid)
+        );
+        CREATE INDEX IF NOT EXISTS roulette_bets_round_v1 ON roulette_bets_v1(round_id,state,id);
+        CREATE INDEX IF NOT EXISTS roulette_bets_user_v1 ON roulette_bets_v1(round_id,uid,state);
+        CREATE TABLE IF NOT EXISTS roulette_replays_v1(
+            round_id INTEGER NOT NULL,
+            uid INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(round_id,uid)
+        );
         ''')
         c.execute('DELETE FROM app_checks_v6 WHERE ts<?', (int(time.time()) - 90*86400,))
 
@@ -224,18 +261,11 @@ async def moderation_input(m: Message):
     if await process_moderation(m,action,m.text or ''): admin_waiting.pop(m.from_user.id,None)
 
 def log_text(r):
-    stamp = time.strftime('%d.%m', time.gmtime(r['ts']))
-    msk = time.strftime('%H:%M', time.gmtime(r['ts'] + 3 * 3600))
-    status_line = (emoji('5206607081334906820', '✅') + ' <b>Прошел</b>' if r['status'] == 'passed'
-                   else emoji('5240241223632954241', '⛔') + ' <b>Забанен.</b>')
-    reason = r['reason'] or 'Совпадений нет'
-    return (status_line + '\n'
-            + emoji('5260293700088511294', '🔎') + f' <b>Проверка #{r["id"]} {stamp} {msk}</b>\n'
-            + emoji('5936017305585586269', '🆔') + f' <b>ID:</b> <code>{r["uid"]}</code>\n'
-            + emoji('5775887550262546277', '🌐') + f' <b>IP:</b> <code>{esc(r["ip"])}</code>\n'
-            + emoji('5967591100532134862', '📱') + f' <b>Устройство/OC:</b> {esc(r["device"])}\n'
-            + emoji('5994378914636500516', '📲') + f' <b>Версия WebApp API:</b> {esc(r["api_version"] or "не определена")}\n'
-            + emoji('5920344347152224466', '🔍') + f' <b>{esc(reason)}</b>')
+    return (f'<b>Проверка #{r["id"]}</b> · {time.strftime("%d.%m %H:%M UTC",time.gmtime(r["ts"]))}\n'
+            f'ID: <code>{r["uid"]}</code>\n{esc(STATUS.get(r["status"],r["status"]))}\n'
+            f'IP: <code>{esc(r["ip"])}</code>\nУстройство/ОС (данные браузера): {esc(r["device"])}\n'
+            f'Гео IP: {esc(r["geo"] or "не определено")}\nПлатформа Mini App: {esc(r["platform"])}\n'
+            f'Версия Web App API, НЕ приложения: {esc(r["api_version"])}\n{esc(r["reason"])}')
 
 def appeal_buttons(aid): return kb([[button('✅ Одобрить',f'admin:approve:{aid}'),button('❌ Отклонить',f'admin:reject:{aid}')]])
 
@@ -370,18 +400,15 @@ async def change_balance(m: Message):
 def odds(card, direction):
     count=card-1 if direction=='low' else 13-card
     if count<=0: return None
-    # Hi-Lo multiplier with 96% return.
-    return (Decimal('0.96')*13/Decimal(count)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
-def money_out(g): return min(MAX_PAYOUT,int((Decimal(g['bet'])*Decimal(g['mult'])).quantize(Decimal('1'),rounding=ROUND_DOWN)))
-def mult_text(value):
-    # Decimal formatting prevents float tails and removes unnecessary trailing zeroes.
-    number=Decimal(str(value)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
-    return format(number.normalize(), 'f')
-def card_name(n): return {1:'Туз (1)',11:'Валет (11)',12:'Дама (12)',13:'Король (13)'}.get(n,str(n))
+    return (Decimal('0.9675')*13/Decimal(count)).quantize(Decimal('0.01'),rounding=ROUND_DOWN)
+def money_out(g): return min(MAX_PAYOUT,int(Decimal(g['bet'])*Decimal(g['mult'])))
+def card_name(n): return {1:'A',11:'J',12:'Q',13:'K'}.get(n,str(n))
+def fmt_mult(value):
+    return format(Decimal(str(value)).normalize(), 'f')
 def game_text(g):
-    return ('<b>'+emoji('5447327564345416222','🎴')+' Хило</b>\n\n<blockquote>'
+    return ('<b>'+emoji('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote>'
             '<b>'+emoji('5389099885259666198','🃏')+' Карта:</b> <code>'+card_name(g['card'])+'</code>\n'
-            '<b>'+emoji('5447160283959173987','✖️')+' Множитель:</b> <code>x'+mult_text(g['mult'])+'</code></blockquote>')
+            '<b>'+emoji('5447160283959173987','✖️')+' Множитель:</b> <code>x'+fmt_mult(g['mult'])+'</code></blockquote>')
 def game_keys(g):
     row=[]
     for direction,label,eid,color in [('low','Ниже','5447490850412074781','danger'),('high','Выше','5449683594425410231','success')]:
@@ -390,7 +417,7 @@ def game_keys(g):
             row.append(button(f'{label} x{k}',f'hilo:{g["id"]}:{g["rev"]}:{direction}',eid,color))
     rows=[row]
     if g['wins']:
-        rows.append([button(f'Забрать выигрыш x{mult_text(g["mult"])}',f'hilo:{g["id"]}:{g["rev"]}:cash','5447184078077992135','primary')])
+        rows.append([button(f'Забрать выигрыш x{fmt_mult(g["mult"])}',f'hilo:{g["id"]}:{g["rev"]}:cash','5447184078077992135','primary')])
     return kb(rows)
 
 def create_game(uid,bet,chat,msg):
@@ -408,34 +435,24 @@ def create_game(uid,bet,chat,msg):
         gid=c.execute("INSERT INTO app_hilo_v6(uid,bet,card,mult,chat,msg) VALUES(?,?,?,'1.0',?,?)",(uid,bet,secrets.randbelow(13)+1,chat,msg)).lastrowid
         return dict(c.execute('SELECT * FROM app_hilo_v6 WHERE id=?',(gid,)).fetchone()),None
 
-def resume_keys(g):
-    rows = [[button('Продолжить', f'hilo:{g["id"]}:{g["rev"]}:resume', '5449683594425410231', 'primary')]]
-    if g['wins'] > 0:
-        rows.append([button(f'Забрать выигрыш x{mult_text(g["mult"])}', f'hilo:{g["id"]}:{g["rev"]}:cash', '5447184078077992135', 'primary')])
-    return kb(rows)
-
-@dp.message(F.text.regexp(r'(?i)^\s*(хл|хило)(?:\s+[0-9]{1,10})?\s*$'))
+@dp.message(F.text.regexp(r'(?i)^\s*(хл|хило)(?:\s+.*)?$'))
 async def hilo(m: Message):
     if not m.from_user or m.from_user.is_bot or m.sender_chat: return
-    if user_status(m.from_user.id) == 'failed':
-        await output(m, BLOCKED, reply=True); return
-    # Existing active game always takes priority over a new stake argument.
-    with db() as c:
-        active = c.execute("SELECT * FROM app_hilo_v6 WHERE uid=? AND state='active'", (m.from_user.id,)).fetchone()
-    if active:
-        g = dict(active)
-        await output(m, game_text(g), resume_keys(g), reply=True)
-        return
-    parts = (m.text or '').split()
-    if len(parts) != 2:
-        await output(m, '<b>Укажи ставку: хл 10</b>', reply=True); return
-    bet = int(parts[1])
-    if not 10 <= bet <= MAX_BET:
-        await output(m, '<b>Ставка от 10 до '+fmt(MAX_BET)+' бубликов.</b>', reply=True); return
-    g, error = await asyncio.to_thread(create_game, m.from_user.id, bet, m.chat.id, m.message_id)
-    if error:
-        await m.reply(error); return
-    await output(m, game_text(g), game_keys(g), reply=True)
+    touch(m.from_user.id,m.from_user.full_name)
+    if user_status(m.from_user.id)=='failed': await output(m,BLOCKED,reply=True); return
+    p=(m.text or '').split()
+    if len(p)==1:
+        with db() as c: active=c.execute("SELECT * FROM app_hilo_v6 WHERE uid=? AND state='active'",(m.from_user.id,)).fetchone()
+        if active:
+            g=dict(active); await output(m,game_text(g),game_keys(g),reply=True); return
+    if len(p)!=2 or not re.fullmatch(r'[0-9]{1,10}',p[1]):
+        await output(m,'<b>'+emoji('5886436057091673541','🎴')+' Хило [ N ]\n'+emoji('5897846616966041652','🔮')+' Угадать последовательность: Выше | Ниже от Туза (1) До короля (13)</b>',reply=True); return
+    bet=int(p[1])
+    if not 10<=bet<=MAX_BET:
+        await output(m,'<b>'+emoji('5886436057091673541','🎴')+' Хило [ N ]\n'+emoji('5897846616966041652','🔮')+' Угадать последовательность: Выше | Ниже от Туза (1) До короля (13)</b>',reply=True); return
+    g,error=await asyncio.to_thread(create_game,m.from_user.id,bet,m.chat.id,m.message_id)
+    if error: await m.reply(error); return
+    await output(m,game_text(g),game_keys(g),reply=True)
 
 def play_game(uid,gid,rev,action):
     with db() as c:
@@ -447,8 +464,6 @@ def play_game(uid,gid,rev,action):
         if u and u['status']=='failed': return dict(r),'Аккаунт заблокирован; обратись к администратору.'
         g=dict(r)
         if rev!=g['rev']: return g,'Это устаревшая кнопка. Показан текущий ход.'
-        if action=='resume':
-            return g,None
         if action=='cash':
             if not g['wins']: return g,'Сначала угадай хотя бы одну карту.'
             value=money_out(g)
@@ -462,7 +477,7 @@ def play_game(uid,gid,rev,action):
             new=secrets.randbelow(13)+1
             win=new<g['card'] if action=='low' else new>g['card']
             if win:
-                mult=(Decimal(g['mult'])*rate).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+                mult=(Decimal(g['mult'])*rate).quantize(Decimal('0.000001'),rounding=ROUND_DOWN)
                 # Bound the multiplier; payoff is separately capped at MAX_PAYOUT.
                 mult=min(mult,Decimal(MAX_PAYOUT)/Decimal(g['bet']))
                 c.execute('UPDATE app_hilo_v6 SET card=?,mult=?,wins=wins+1,rev=rev+1 WHERE id=?',(new,str(mult),gid))
@@ -485,15 +500,291 @@ async def hilo_action(q: CallbackQuery):
     g,error=await asyncio.to_thread(play_game,q.from_user.id,gid,rev,action)
     await q.answer(error,show_alert=bool(error))
     if g:
-        if action == 'resume' and g['state'] == 'active':
-            text, markup = game_text(g), game_keys(g)
-        else:
-            text,markup=game_result(g)
+        text,markup=game_result(g)
         await output(q.message,text,markup,edit=True)
+
+# Roulette uses the same virtual bублики balance as Hi-Lo. A round is per chat.
+ROULETTE_RED = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+ROULETTE_COOLDOWN = 13
+ROULETTE_EMOJI = {
+    'red': ('5388647401865097828', '🔴'),
+    'green': ('5388907487904674520', '🟢'),
+    'fire': ('6008104758236156926', '🔥'),
+    'smile': ('5994473545650934240', '😀'),
+    'crown': ('5807868868886009920', '👑'),
+    'clock': ('5258258882022612173', '⏲'),
+    'repeat': ('5877410604225924969', '🔄'),
+    'double': ('6026261955818294779', '⏩'),
+}
+
+def roulette_color(number):
+    if number == 0: return 'green'
+    return 'red' if number in ROULETTE_RED else 'black'
+
+def roulette_color_emoji(color):
+    if color == 'red': return emoji(*ROULETTE_EMOJI['red'])
+    if color == 'green': return emoji(*ROULETTE_EMOJI['green'])
+    return '⚫️'
+
+def roulette_parse_type(raw):
+    token = raw.strip().lower().replace('ё','е')
+    if token in ('к','красный','красная','красное','red'):
+        return ('color','red','RED',Decimal('1.98'))
+    if token in ('ч','черный','черная','черное','black'):
+        return ('color','black','BLACK',Decimal('1.98'))
+    if token in ('з','зеленый','зеленая','зеленое','green'):
+        return ('color','green','GREEN',Decimal('35.98'))
+    if token in ('odd','нечет','нечетный'):
+        return ('parity','odd','ODD',Decimal('1.98'))
+    if token in ('even','чет','четный'):
+        return ('parity','even','EVEN',Decimal('1.98'))
+    if token.isdigit():
+        n=int(token)
+        if not 0 <= n <= 36: raise ValueError('Число должно быть от 0 до 36.')
+        return ('number',str(n),str(n),Decimal('35.98'))
+    m=re.fullmatch(r'(\d{1,2})-(\d{1,2})',token)
+    if m:
+        lo,hi=map(int,m.groups())
+        if not (0 <= lo <= hi <= 36): raise ValueError('Диапазон должен быть внутри 0–36.')
+        if lo==hi: return ('number',str(lo),str(lo),Decimal('35.98'))
+        if (lo,hi) in ((1,18),(19,36)):
+            label='1–18' if lo==1 else '19–36'
+            return ('range',f'{lo}-{hi}',label,Decimal('1.98'))
+        count=hi-lo+1
+        rate=(Decimal('35.98')/Decimal(count)).quantize(Decimal('0.01'),rounding=ROUND_DOWN)
+        return ('range',f'{lo}-{hi}',f'{lo}–{hi}',rate)
+    raise ValueError('Тип ставки: к, ч, з, odd, even, число 0–36 или диапазон, например 2-24.')
+
+def roulette_bet_wins(bet, number, color):
+    kind=bet['bet_type']; sel=bet['selection']
+    if kind=='color': return color==sel
+    if kind=='parity': return number!=0 and ('odd' if number%2 else 'even')==sel
+    if kind=='number': return number==int(sel)
+    if kind=='range':
+        lo,hi=map(int,sel.split('-'))
+        return lo<=number<=hi
+    return False
+
+def roulette_round_bets(round_id, uid=None):
+    with db() as c:
+        if uid is None:
+            rows=c.execute("SELECT * FROM roulette_bets_v1 WHERE round_id=? AND state='active' ORDER BY id",(round_id,)).fetchall()
+        else:
+            rows=c.execute("SELECT * FROM roulette_bets_v1 WHERE round_id=? AND uid=? AND state='active' ORDER BY id",(round_id,uid)).fetchall()
+    return [dict(r) for r in rows]
+
+def roulette_add_bet(chat, uid, name, amount, raw_type, source_chat, source_msg):
+    kind,selection,label,mult=roulette_parse_type(raw_type)
+    now=int(time.time())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        duplicate=c.execute('SELECT id FROM roulette_bets_v1 WHERE source_chat=? AND source_msg=? AND source_index=0 AND uid=?',(source_chat,source_msg,uid)).fetchone()
+        if duplicate: return None,'Эта ставка уже принята.'
+        bal=c.execute('SELECT amount FROM balances WHERE uid=?',(uid,)).fetchone()
+        current=bal['amount'] if bal else 0
+        if current<amount: return None,f'Недостаточно бубликов. Баланс: {fmt(current)}.'
+        r=c.execute("SELECT * FROM roulette_rounds_v1 WHERE chat=? AND state='open' ORDER BY id DESC LIMIT 1",(chat,)).fetchone()
+        if not r:
+            rid=c.execute("INSERT INTO roulette_rounds_v1(chat,state,created_at,last_bet_at) VALUES(?,'open',?,?)",(chat,now,now)).lastrowid
+        else: rid=r['id']
+        c.execute('UPDATE balances SET amount=amount-? WHERE uid=?',(amount,uid))
+        c.execute("""INSERT INTO roulette_bets_v1(round_id,uid,name,bet_type,selection,label,amount,multiplier,created_at,source_chat,source_msg)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(rid,uid,name[:256],kind,selection,label,amount,str(mult),now,source_chat,source_msg))
+        c.execute('UPDATE roulette_rounds_v1 SET last_bet_at=? WHERE id=?',(now,rid))
+        row=dict(c.execute('SELECT * FROM roulette_rounds_v1 WHERE id=?',(rid,)).fetchone())
+    return row,None
+
+def roulette_cancel_bets(chat,uid):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute("SELECT * FROM roulette_rounds_v1 WHERE chat=? AND state='open' ORDER BY id DESC LIMIT 1",(chat,)).fetchone()
+        if not r: return None,'Нет открытого раунда.'
+        rows=c.execute("SELECT * FROM roulette_bets_v1 WHERE round_id=? AND uid=? AND state='active'",(r['id'],uid)).fetchall()
+        if not rows: return None,'У тебя нет ставок в текущем раунде.'
+        total=sum(x['amount'] for x in rows)
+        c.execute('UPDATE balances SET amount=amount+? WHERE uid=?',(total,uid))
+        c.execute("UPDATE roulette_bets_v1 SET state='cancelled' WHERE round_id=? AND uid=? AND state='active'",(r['id'],uid))
+        left=c.execute("SELECT COUNT(*) n FROM roulette_bets_v1 WHERE round_id=? AND state='active'",(r['id'],)).fetchone()['n']
+        if not left: c.execute("UPDATE roulette_rounds_v1 SET state='cancelled' WHERE id=?",(r['id'],))
+        return {'round_id':r['id'],'amount':total},None
+
+def roulette_start_round(chat):
+    now=int(time.time())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute("SELECT * FROM roulette_rounds_v1 WHERE chat=? AND state='open' ORDER BY id DESC LIMIT 1",(chat,)).fetchone()
+        if not r: return None,'Нет открытого раунда.',0
+        bets=c.execute("SELECT * FROM roulette_bets_v1 WHERE round_id=? AND state='active' ORDER BY id",(r['id'],)).fetchall()
+        if not bets:
+            c.execute("UPDATE roulette_rounds_v1 SET state='cancelled' WHERE id=?",(r['id'],))
+            return None,'В раунде нет ставок.',0
+        remaining=ROULETTE_COOLDOWN-(now-r['last_bet_at'])
+        if remaining>0: return None,'wait',remaining
+        number=secrets.randbelow(37); color=roulette_color(number)
+        c.execute("UPDATE roulette_rounds_v1 SET state='finished',result_number=?,result_color=? WHERE id=?",(number,color,r['id']))
+        results=[]
+        for b in bets:
+            won=roulette_bet_wins(b,number,color)
+            payout=0
+            if won:
+                payout=int((Decimal(b['amount'])*Decimal(b['multiplier'])).to_integral_value(rounding=ROUND_DOWN))
+                bal=c.execute('SELECT amount FROM balances WHERE uid=?',(b['uid'],)).fetchone()
+                current=bal['amount'] if bal else 0
+                payout=max(0,min(payout,MAX_PAYOUT,MAX_MONEY-current))
+                if payout: c.execute('UPDATE balances SET amount=amount+? WHERE uid=?',(payout,b['uid']))
+            c.execute("UPDATE roulette_bets_v1 SET state='settled',won=?,payout=? WHERE id=?",(1 if won else 0,payout,b['id']))
+            results.append({**dict(b),'won':1 if won else 0,'payout':payout})
+        return {'id':r['id'],'number':number,'color':color,'bets':results},None,0
+
+def roulette_replay(old_round_id,uid,mode,chat,source_chat,source_msg):
+    now=int(time.time())
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        old=c.execute("SELECT * FROM roulette_rounds_v1 WHERE id=? AND state='finished'",(old_round_id,)).fetchone()
+        if not old or old['chat']!=chat: return None,'Раунд уже недоступен.'
+        used=c.execute('SELECT 1 FROM roulette_replays_v1 WHERE round_id=? AND uid=?',(old_round_id,uid)).fetchone()
+        if used: return None,'Ты уже повторил ставки этого раунда.'
+        old_bets=c.execute("SELECT * FROM roulette_bets_v1 WHERE round_id=? AND uid=? AND state='settled' ORDER BY id",(old_round_id,uid)).fetchall()
+        if not old_bets: return None,'В прошлом раунде у тебя не было ставок.'
+        factor=2 if mode=='double' else 1
+        total=sum(b['amount']*factor for b in old_bets)
+        if any(b['amount']*factor>MAX_BET for b in old_bets): return None,'Удвоенная ставка превышает лимит.'
+        bal=c.execute('SELECT amount FROM balances WHERE uid=?',(uid,)).fetchone()
+        current=bal['amount'] if bal else 0
+        if current<total: return None,f'Недостаточно бубликов. Нужно: {fmt(total)}, баланс: {fmt(current)}.'
+        r=c.execute("SELECT * FROM roulette_rounds_v1 WHERE chat=? AND state='open' ORDER BY id DESC LIMIT 1",(chat,)).fetchone()
+        if not r:
+            rid=c.execute("INSERT INTO roulette_rounds_v1(chat,state,created_at,last_bet_at) VALUES(?,'open',?,?)",(chat,now,now)).lastrowid
+        else: rid=r['id']
+        c.execute('UPDATE balances SET amount=amount-? WHERE uid=?',(total,uid))
+        c.execute('INSERT INTO roulette_replays_v1(round_id,uid,mode,created_at) VALUES(?,?,?,?)',(old_round_id,uid,mode,now))
+        for i,b in enumerate(old_bets):
+            amount=b['amount']*factor
+            c.execute("""INSERT INTO roulette_bets_v1(round_id,uid,name,bet_type,selection,label,amount,multiplier,created_at,source_chat,source_msg,source_index)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(rid,uid,b['name'],b['bet_type'],b['selection'],b['label'],amount,b['multiplier'],now,source_chat,source_msg,i+1))
+        c.execute('UPDATE roulette_rounds_v1 SET last_bet_at=? WHERE id=?',(now,rid))
+    return {'round_id':rid,'amount':total,'count':len(old_bets)},None
+
+def roulette_result_bets(round_id):
+    with db() as c:
+        rows=c.execute("SELECT * FROM roulette_bets_v1 WHERE round_id=? AND state='settled' ORDER BY id",(round_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+def roulette_bets_message(round_id, uid=None):
+    rows=roulette_round_bets(round_id,uid)
+    if not rows: return None
+    lines=[]
+    for b in rows[:35]:
+        lines.append('<b>'+emoji(*ROULETTE_EMOJI['smile'])+fmt(b['amount'])+' на '+roulette_label_markup(b['label'])+'</b>')
+    if len(rows)>35: lines.append('<b>…и ещё '+str(len(rows)-35)+' ставок</b>')
+    return '<b>'+emoji(*ROULETTE_EMOJI['fire'])+' Ставки приняты:</b>\n\n<blockquote>'+'\n'.join(lines)+'</blockquote>'
+
+def roulette_label_markup(label):
+    if label=='RED': return roulette_color_emoji('red')+' <b>RED</b>'
+    if label=='BLACK': return '⚫️ <b>BLACK</b>'
+    if label=='GREEN': return roulette_color_emoji('green')+' <b>GREEN</b>'
+    return '<b>'+esc(label)+'</b>'
+
+def roulette_result_message(result):
+    color=result['color']; number=result['number']
+    text='<b>'+emoji(*ROULETTE_EMOJI['crown'])+' Выпало: '+roulette_color_emoji(color)+' '+str(number)+'</b>'
+    lines=[]
+    for b in result['bets'][:35]:
+        status=('выиграл '+fmt(b['payout'])+' бубликов' if b['won'] else 'проиграл '+fmt(b['amount'])+' бубликов')
+        lines.append('<b>'+mention(b['uid'],b['name'])+' ставил '+fmt(b['amount'])+' на '+roulette_label_markup(b['label'])+' — '+status+'</b>')
+    if len(result['bets'])>35: lines.append('<b>…и ещё '+str(len(result['bets'])-35)+' ставок</b>')
+    return text+'\n\n<blockquote>'+'\n'.join(lines)+'</blockquote>',kb([[button('Повторить ставку',f'roulette:repeat:{result["id"]}',ROULETTE_EMOJI['repeat'][0]),button('Удвоить ставку',f'roulette:double:{result["id"]}',ROULETTE_EMOJI['double'][0])]])
+
+@dp.message(F.text.regexp(r'(?i)^\s*(?:/(?:лог|log|го|go|отмена|ставки)(?:@\w+)?|(?:лог|log|го|go|отмена|ставки))\s*$'))
+async def roulette_commands(m: Message):
+    if not m.from_user or m.from_user.is_bot or m.sender_chat: return
+    if m.chat.type not in ('group','supergroup'):
+        await m.reply('Рулетка доступна в групповых чатах.'); return
+    text=(m.text or '').strip().lower().split('@',1)[0]
+    cmd=text[1:] if text.startswith('/') else text
+    uid=m.from_user.id; chat=m.chat.id
+    touch(uid,m.from_user.full_name)
+    if user_status(uid)=='failed': await output(m,BLOCKED,reply=True); return
+    if cmd in ('го','go'):
+        result,error,remaining=await asyncio.to_thread(roulette_start_round,chat)
+        if error=='wait':
+            await output(m,'<b>'+emoji(*ROULETTE_EMOJI['clock'])+' Подождите '+str(remaining)+' секунд…</b>',reply=True); return
+        if error: await m.reply(error); return
+        msg,markup=roulette_result_message(result)
+        await output(m,msg,markup); return
+    with db() as c:
+        current=c.execute("SELECT * FROM roulette_rounds_v1 WHERE chat=? AND state='open' ORDER BY id DESC LIMIT 1",(chat,)).fetchone()
+    if cmd=='отмена':
+        result,error=await asyncio.to_thread(roulette_cancel_bets,chat,uid)
+        if error: await m.reply(error)
+        else: await output(m,'<b>Ставки отменены. Возвращено: '+fmt(result['amount'])+' бубликов.</b>',reply=True)
+        return
+    if cmd=='ставки':
+        if not current: await m.reply('В текущем раунде у тебя нет ставок.'); return
+        rows=roulette_round_bets(current['id'],uid)
+        if not rows: await m.reply('В текущем раунде у тебя нет ставок.'); return
+        lines=['<b>'+fmt(b['amount'])+' на '+roulette_label_markup(b['label'])+'</b>' for b in rows]
+        total=sum(b['amount'] for b in rows)
+        await output(m,'<b>Твои ставки в раунде #'+str(current['id'])+':</b>\n\n<blockquote>'+'\n'.join(lines)+'\n\n<b>Всего: '+fmt(total)+' бубликов</b></blockquote>',reply=True); return
+    if cmd in ('лог','log'):
+        if current:
+            body=roulette_bets_message(current['id'])
+            await output(m,'<b>Лог рулетки · раунд #'+str(current['id'])+'</b>\n\n'+(body or 'Ставок пока нет.'),reply=True)
+        else:
+            with db() as c: last=c.execute("SELECT * FROM roulette_rounds_v1 WHERE chat=? AND state='finished' ORDER BY id DESC LIMIT 1",(chat,)).fetchone()
+            if not last: await m.reply('История рулетки пока пуста.'); return
+            lines,markup=roulette_result_message({'id':last['id'],'number':last['result_number'],'color':last['result_color'],'bets':roulette_result_bets(last['id'])})
+            await output(m,lines,markup,reply=True)
+        return
+
+@dp.message(F.text.regexp(r'(?i)^\s*[0-9]{1,12}\s+(?:к|красн\w*|red|ч|ч[её]рн\w*|black|з|зелен\w*|green|odd|even|ч[её]т\w*|неч[её]т\w*|[0-9]{1,2}(?:-[0-9]{1,2})?)\s*$'))
+async def roulette_bet(m: Message):
+    if not m.from_user or m.from_user.is_bot or m.sender_chat: return
+    if m.chat.type not in ('group','supergroup'): return
+    uid=m.from_user.id; touch(uid,m.from_user.full_name)
+    if user_status(uid)=='failed': await output(m,BLOCKED,reply=True); return
+    p=(m.text or '').split()
+    amount=int(p[0])
+    if not 1<=amount<=MAX_BET:
+        await m.reply('Ставка должна быть от 1 до '+fmt(MAX_BET)+' бубликов.'); return
+    try:
+        roulette_parse_type(p[1])
+    except ValueError as exc:
+        await m.reply(str(exc)); return
+    try:
+        r,error=await asyncio.to_thread(roulette_add_bet,m.chat.id,uid,m.from_user.full_name,amount,p[1],m.chat.id,m.message_id)
+    except ValueError as exc:
+        await m.reply(str(exc)); return
+    if error: await m.reply(error); return
+    body=roulette_bets_message(r['id'])
+    await output(m,(body or '<b>Ставка принята.</b>')+'\n\n<b>'+emoji(*ROULETTE_EMOJI['clock'])+' Подождите 13 секунд…</b>',reply=True)
+
+@dp.callback_query(F.data.startswith('roulette:'))
+async def roulette_replay_action(q: CallbackQuery):
+    if not isinstance(q.message,Message): await q.answer(); return
+    try:
+        _,mode,raw=q.data.split(':'); old_id=int(raw)
+        if mode not in ('repeat','double'): raise ValueError()
+    except ValueError:
+        await q.answer('Некорректная кнопка.',show_alert=True); return
+    if q.message.chat.type not in ('group','supergroup'):
+        await q.answer('Рулетка доступна в группах.',show_alert=True); return
+    touch(q.from_user.id,q.from_user.full_name)
+    if user_status(q.from_user.id)=='failed':
+        await q.answer('Аккаунт заблокирован.',show_alert=True); return
+    result,error=await asyncio.to_thread(roulette_replay,old_id,q.from_user.id,mode,q.message.chat.id,q.message.chat.id,q.message.message_id)
+    if error:
+        await q.answer(error,show_alert=True); return
+    await q.answer('Ставки повторены.' if mode=='repeat' else 'Ставки удвоены.')
+    with db() as c: r=c.execute('SELECT id FROM roulette_rounds_v1 WHERE id=?',(result['round_id'],)).fetchone()
+    if r:
+        body=roulette_bets_message(result['round_id'])
+        try: await q.message.reply((body or '<b>Ставки приняты.</b>')+'\n\n<b>'+emoji(*ROULETTE_EMOJI['clock'])+' Подождите 13 секунд…</b>')
+        except Exception: pass
 
 @dp.message()
 async def other(m: Message):
-    # Unrelated messages are intentionally ignored.
+    # Ignore unrelated messages; only registered commands and game actions get a reply.
     return
 
 # Web verification. No random browser ID is used for the decision.
@@ -603,15 +894,61 @@ def record_check(uid,name,ip,fp,device,geo,platform,api_version):
         row=dict(c.execute('SELECT * FROM app_checks_v6 WHERE id=?',(rid,)).fetchone())
     return {'status':result},row
 
-PAGE=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Проверка</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{font:16px system-ui;background:var(--tg-theme-bg-color,#101522);color:var(--tg-theme-text-color,#fff);padding:24px;margin:0}main{max-width:480px;margin:40px auto}button{width:100%;padding:16px;margin-top:20px;border:0;border-radius:14px;background:var(--tg-theme-button-color,#6274ff);color:var(--tg-theme-button-text-color,white);font-size:16px}button:disabled{opacity:.5}details,label{display:block;font-size:13px;line-height:1.5;margin-top:20px}#result{white-space:pre-wrap;font-size:20px;font-weight:bold;margin-top:24px}[hidden]{display:none!important}</style></head><body><main><h2>🧹 Пройти проверку на твинк.</h2><section id="form" hidden><details><summary>Правила и обработка данных</summary><p>Сохраняются Telegram ID, имя, IP-адрес, характеристики ОС/устройства и экрана, приблизительный отпечаток устройства, платформа и версия Web App API. Если настроена локальная GeoIP-база, определяется приблизительный город по IP — не GPS. Данные проверки хранятся до 90 дней и отправляются администраторам в Telegram. Копии сообщений у администраторов автоматически не удаляются. Профиль, баланс, статус и финансовая история остаются до удаления владельцем. Имя прошедшего проверку со ссылкой публикуется в топе.</p><p>Автобан при совпадении IP ИЛИ набора характеристик устройства с другим прошедшим аккаунтом. Общий Wi-Fi/VPN и одинаковые телефоны могут дать ложный бан. Сведения браузера можно подделать. Это не доказательство твинка и не уникальный ID телефона. Точный мод/официальный клиент и версия приложения Telegram не определяются. Оспаривание: /appeal причина. Запрос удаления данных можно передать владельцу бота; заблокированные пользователи могут включить его в апелляцию.</p></details><label><input id="agree" type="checkbox"> Согласен на указанную обработку данных и публикацию в топе</label><button id="verify" disabled>Пройти проверку</button></section><div id="result">Загрузка…</div><button id="retry" hidden>Повторить загрузку</button><button id="close" hidden>Вернуться в бот</button></main><script>
+def start_web_game(uid, bet):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        active=c.execute("SELECT * FROM app_hilo_v6 WHERE uid=? AND state='active'",(uid,)).fetchone()
+        if active: return dict(active), None
+        bal=c.execute('SELECT amount FROM balances WHERE uid=?',(uid,)).fetchone()
+        if not bal or bal['amount'] < bet: return None, 'Недостаточно бубликов.'
+        c.execute('UPDATE balances SET amount=amount-? WHERE uid=?',(bet,uid))
+        # Negative message IDs keep Mini App games distinct from Telegram message games.
+        msg=-secrets.randbelow(2_000_000_000)-1
+        gid=c.execute("INSERT INTO app_hilo_v6(uid,bet,card,mult,chat,msg) VALUES(?,?,?,'1',?,?)",(uid,bet,secrets.randbelow(13)+1,uid,msg)).lastrowid
+        return dict(c.execute('SELECT * FROM app_hilo_v6 WHERE id=?',(gid,)).fetchone()), None
+
+def web_game_payload(uid, g=None):
+    with db() as c:
+        bal=c.execute('SELECT amount FROM balances WHERE uid=?',(uid,)).fetchone()
+    amount=bal['amount'] if bal else 0
+    if not g:
+        with db() as c: row=c.execute("SELECT * FROM app_hilo_v6 WHERE uid=? AND state='active'",(uid,)).fetchone()
+        g=dict(row) if row else None
+    if not g: return {'game':None,'balance':amount}
+    return {'game':{'id':g['id'],'rev':g['rev'],'state':g['state'],'bet':g['bet'],'card':g['card'],'card_label':card_name(g['card']),'mult':fmt_mult(g['mult']),'wins':g['wins'],'payout':g['payout'],'cashout':money_out(g) if g['state']=='active' else g['payout'],'can_cash':bool(g['wins'])},'balance':amount}
+
+PAGE=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#101323"><title>Игры</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151d32;--panel2:#1b2741;--muted:#9aa8c3;--text:#f4f7ff;--line:#293653;--accent:#8b7cff;--green:#28c58a;--red:#ff647c}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 20% -10%,#34306b 0,transparent 38%),radial-gradient(ellipse at 100% 30%,#153b54 0,transparent 32%),var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh;padding:18px 15px 32px}
+main{max-width:520px;margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;margin:10px 2px 22px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px}.brand span{color:#a99eff}.balance{background:#1c2943;border:1px solid #354466;padding:9px 13px;border-radius:14px;font-weight:800}.balance small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px}.card{background:linear-gradient(145deg,rgba(28,39,65,.97),rgba(17,26,46,.97));border:1px solid var(--line);border-radius:23px;padding:20px;box-shadow:0 18px 55px #0005;margin-bottom:15px}.eyebrow{color:#b5aaff;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:1.7px}.title{font-size:25px;font-weight:950;margin:4px 0 5px}.muted{color:var(--muted)}.tabs{display:flex;gap:8px;margin:0 0 15px}.tab{flex:1;border:1px solid var(--line);background:#151d32;color:var(--muted);border-radius:13px;padding:11px;font-weight:800}.tab.active{background:#5144a8;border-color:#8174e8;color:white}.game-tile{display:flex;align-items:center;gap:14px;width:100%;text-align:left;background:#1b2741;border:1px solid #354466;border-radius:18px;padding:15px;color:var(--text);margin-top:12px}.tile-icon{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;font-size:24px;background:linear-gradient(135deg,#7161dd,#a15dd0)}.game-tile strong{display:block;font-size:16px}.game-tile small{color:var(--muted)}button{font:inherit;cursor:pointer}.primary{width:100%;border:0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#7968f2,#5b68e8);color:white;font-weight:900;box-shadow:0 8px 24px #615be54a}.secondary{border:1px solid #405072;background:#202d49;color:white;border-radius:13px;padding:12px;font-weight:800}.danger{background:#54273b;border:1px solid #8a4058;color:#ff9aac}.input{width:100%;background:#0f172a;border:1px solid #3a4968;border-radius:13px;padding:14px;color:white;font:inherit;margin:9px 0 13px;outline:none}.game-head{display:flex;justify-content:space-between;align-items:center}.playing-card{margin:18px auto;width:132px;height:176px;border-radius:19px;background:linear-gradient(145deg,#fff,#dce5ff);color:#171d35;display:flex;flex-direction:column;justify-content:space-between;padding:14px;font-size:37px;font-weight:950;box-shadow:0 12px 30px #0006}.playing-card .suit{font-size:29px;align-self:flex-end}.stats{display:grid;grid-template-columns:1fr 1fr;gap:9px}.stat{background:#10192c;border:1px solid #2b3a59;border-radius:14px;padding:11px}.stat small{display:block;color:var(--muted);font-size:11px}.stat b{font-size:19px}.actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px}.action{border:0;border-radius:13px;padding:14px 8px;font-weight:950;color:white}.up{background:linear-gradient(135deg,#149b77,#27c58a)}.down{background:linear-gradient(135deg,#bd4668,#ed637b)}.cash{margin-top:10px}.notice{font-size:12px;color:var(--muted);margin-top:14px}.hidden{display:none!important}.result{font-weight:900;margin:12px 0;color:#c4baff}.verify-button{margin-top:18px}.foot{color:#72809e;text-align:center;font-size:11px;margin:22px 0}
+</style></head><body><main>
+<header class="top"><div class="brand">✦ <span>GAME</span> HUB</div><div class="balance"><small>Баланс</small><span id="balance">—</span> 🥯</div></header>
+<section id="verifyView" class="card hidden"><div class="eyebrow">Доступ к приложению</div><div class="title">Проверка аккаунта</div><p class="muted">Пройди проверку на повторные аккаунты, чтобы открыть игры. Для проверки используются Telegram ID, IP и технические характеристики устройства.</p><button id="verifyBtn" class="primary verify-button">Пройти проверку</button><div id="verifyResult" class="result"></div></section>
+<section id="blockedView" class="card hidden"><div class="title">Доступ ограничен</div><p class="muted">Проверка не пройдена. Если это ошибка, обратись к администратору через бота.</p></section>
+<section id="appView" class="hidden"><nav class="tabs"><button id="gamesTab" class="tab active">🎮 Игры</button><button id="profileTab" class="tab">👤 Профиль</button></nav>
+<div id="gamesView" class="card"><div class="eyebrow">Выбирай и играй</div><div class="title">Игры</div><button id="openHilo" class="game-tile"><span class="tile-icon">🂡</span><span><strong>Хило</strong><small>Угадай, следующая карта выше или ниже</small></span><span style="margin-left:auto">›</span></button></div>
+<div id="profileView" class="card hidden"><div class="eyebrow">Аккаунт</div><div class="title">Профиль</div><div class="stats"><div class="stat"><small>Telegram ID</small><b id="uid">—</b></div><div class="stat"><small>Статус</small><b>Пройден</b></div></div></div>
+<div id="hiloView" class="card hidden"><div class="game-head"><div><div class="eyebrow">Карточная игра</div><div class="title">Хило</div></div><button id="backGames" class="secondary">← Игры</button></div>
+<div id="hiloStart"><p class="muted">Ставка списывается при старте. Угадай, будет следующая карта выше или ниже текущей. Равная карта — проигрыш.</p><label class="muted" for="bet">Ставка в бубликах</label><input id="bet" class="input" type="number" min="10" step="1" value="10" inputmode="numeric"><button id="startHilo" class="primary">Начать игру</button></div>
+<div id="hiloGame" class="hidden"><div class="playing-card"><span id="cardLabel">A</span><span class="suit">♠</span></div><div class="stats"><div class="stat"><small>Множитель</small><b id="mult">x1</b></div><div class="stat"><small>Выигрыш сейчас</small><b id="payout">0</b></div></div><div class="actions"><button id="lower" class="action down">↓ Ниже</button><button id="higher" class="action up">↑ Выше</button></div><button id="cash" class="primary cash hidden">Забрать выигрыш</button><div id="gameMessage" class="result"></div></div>
+<div id="hiloDone" class="hidden"><div class="result" id="doneText"></div><button id="again" class="primary">Новая игра</button></div><div class="notice">Туз — A · Валет — J · Дама — Q · Король — K</div></div>
+</section><div id="error" class="result"></div><div class="foot">GAME HUB · Mini App</div></main>
+<script>
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
-const form=document.getElementById('form'),agree=document.getElementById('agree'),btn=document.getElementById('verify'),result=document.getElementById('result'),retry=document.getElementById('retry'),closeBtn=document.getElementById('close');let busy=false;
-closeBtn.onclick=()=>tg?.close();agree.onchange=()=>btn.disabled=busy||!agree.checked;
+const $=id=>document.getElementById(id);let currentGame=null,uid=null,busy=false;
 async function api(path,extra={}){if(!tg?.initData)throw Error('Открой Mini App через кнопку в боте.');const r=await fetch(path,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,...extra})});const d=await r.json();if(!r.ok)throw Error(d.detail||'Ошибка сервера');return d;}
-function render(s){form.hidden=s!=='pending';closeBtn.hidden=s==='pending';retry.hidden=true;result.textContent=s==='passed'?'✅ ПРОВЕРКА ПРОЙДЕНА!':s==='failed'?'‼ ПРОВЕРКА НЕ ПРОЙДЕНА!\nОспорить: /appeal причина':'';}
-async function load(){retry.hidden=true;try{render((await api('/api/status')).status)}catch(e){result.textContent=e.message;retry.hidden=false;}}
-retry.onclick=load;
-btn.onclick=async()=>{if(busy||!agree.checked)return;busy=true;btn.disabled=true;agree.disabled=true;try{let hints={};try{hints=await navigator.userAgentData?.getHighEntropyValues(['model'])||{}}catch(e){}const device={model:String(hints.model||''),screen:[Math.min(screen.width,screen.height),Math.max(screen.width,screen.height)],cores:navigator.hardwareConcurrency||0,touch:navigator.maxTouchPoints||0,ratio:devicePixelRatio};result.textContent='Проверяем…';render((await api('/api/verify',{consent:true,device,platform:String(tg.platform||''),api_version:String(tg.version||'')})).status)}catch(e){result.textContent=e.message}finally{busy=false;agree.disabled=false;btn.disabled=!agree.checked;}};load();
+function showError(e){$('error').textContent=e?.message||String(e);}
+function setBalance(v){$('balance').textContent=Number(v||0).toLocaleString('ru-RU');}
+function setTab(which){$('gamesView').classList.toggle('hidden',which!=='games');$('profileView').classList.toggle('hidden',which!=='profile');$('gamesTab').classList.toggle('active',which==='games');$('profileTab').classList.toggle('active',which==='profile');$('hiloView').classList.add('hidden');}
+function showHilo(){ $('gamesView').classList.add('hidden');$('profileView').classList.add('hidden');$('hiloView').classList.remove('hidden');$('gamesTab').classList.remove('active');$('profileTab').classList.remove('active'); }
+function renderGame(d){setBalance(d.balance);currentGame=d.game;if(!currentGame){$('hiloStart').classList.remove('hidden');$('hiloGame').classList.add('hidden');$('hiloDone').classList.add('hidden');return;}if(currentGame.state==='active'){$('hiloStart').classList.add('hidden');$('hiloGame').classList.remove('hidden');$('hiloDone').classList.add('hidden');$('cardLabel').textContent=currentGame.card_label;$('mult').textContent='x'+currentGame.mult;$('payout').textContent=Number(currentGame.cashout).toLocaleString('ru-RU');$('cash').classList.toggle('hidden',!currentGame.can_cash);$('cash').disabled=false;$('lower').disabled=currentGame.card<=1;$('higher').disabled=currentGame.card>=13;$('gameMessage').textContent='Угадай следующую карту';}else{$('hiloStart').classList.add('hidden');$('hiloGame').classList.add('hidden');$('hiloDone').classList.remove('hidden');$('doneText').textContent=currentGame.state==='paid'?'Выигрыш зачислен: '+Number(currentGame.payout).toLocaleString('ru-RU')+' 🥯':'Не угадал. Игра окончена.';}}
+async function loadGame(){const d=await api('/api/hilo/state');renderGame(d);}
+async function actionGame(action){if(busy||!currentGame)return;busy=true;['lower','higher','cash'].forEach(x=>$(x).disabled=true);try{const d=await api('/api/hilo/action',{game_id:currentGame.id,rev:currentGame.rev,action});renderGame(d);if(d.game?.state==='active'&&d.game.rev!==currentGame.rev)$('gameMessage').textContent='Карта открыта!';}catch(e){showError(e)}finally{busy=false;if(currentGame?.state==='active'){$('lower').disabled=currentGame.card<=1;$('higher').disabled=currentGame.card>=13;$('cash').disabled=false;}}}
+$('gamesTab').onclick=()=>setTab('games');$('profileTab').onclick=()=>setTab('profile');$('openHilo').onclick=async()=>{showHilo();try{await loadGame()}catch(e){showError(e)}};$('backGames').onclick=()=>setTab('games');$('again').onclick=()=>{currentGame=null;$('hiloDone').classList.add('hidden');$('hiloStart').classList.remove('hidden');};$('lower').onclick=()=>actionGame('low');$('higher').onclick=()=>actionGame('high');$('cash').onclick=()=>actionGame('cash');
+$('startHilo').onclick=async()=>{const bet=Number($('bet').value);if(!Number.isSafeInteger(bet)||bet<10){showError(new Error('Минимальная ставка — 10 бубликов.'));return;}try{renderGame(await api('/api/hilo/start',{bet}));}catch(e){showError(e)}};
+$('verifyBtn').onclick=async()=>{if(busy)return;busy=true;$('verifyBtn').disabled=true;$('verifyResult').textContent='Проверяем…';try{const hints=await navigator.userAgentData?.getHighEntropyValues(['model']).catch(()=>({}))||{};const device={model:String(hints.model||''),screen:[Math.min(screen.width,screen.height),Math.max(screen.width,screen.height)],cores:navigator.hardwareConcurrency||0,touch:navigator.maxTouchPoints||0,ratio:devicePixelRatio};const d=await api('/api/verify',{device,platform:String(tg.platform||''),api_version:String(tg.version||'')});if(d.status==='passed'){ $('verifyView').classList.add('hidden');$('appView').classList.remove('hidden');$('uid').textContent=uid||'—';await loadGame();}else{$('verifyResult').textContent='Проверка не пройдена.';$('blockedView').classList.remove('hidden');$('verifyView').classList.add('hidden');}}catch(e){$('verifyResult').textContent=e.message;}finally{busy=false;$('verifyBtn').disabled=false;}};
+async function boot(){try{const d=await api('/api/status');uid=d.id||null;if(d.status==='passed'){$('appView').classList.remove('hidden');$('uid').textContent=uid||'—';setBalance(d.balance);await loadGame();}else if(d.status==='failed')$('blockedView').classList.remove('hidden');else $('verifyView').classList.remove('hidden');}catch(e){$('verifyView').classList.remove('hidden');$('verifyResult').textContent=e.message;}}
+boot();
 </script></body></html>'''
 
 @asynccontextmanager
@@ -656,13 +993,13 @@ async def api_status(req: Request):
             evidence=c.execute('SELECT 1 FROM app_checks_v6 WHERE uid=? LIMIT 1',(u['id'],)).fetchone()
             exempt=c.execute('SELECT 1 FROM app_exempt_v6 WHERE uid=?',(u['id'],)).fetchone()
         if not evidence and not exempt: s='pending'
-    return JSONResponse({'status':s},headers={'Cache-Control':'no-store'})
+    with db() as c: bal=c.execute('SELECT amount FROM balances WHERE uid=?',(u['id'],)).fetchone()
+    return JSONResponse({'status':s,'id':u['id'],'balance':bal['amount'] if bal else 0},headers={'Cache-Control':'no-store'})
 
 @app.post('/api/verify')
 async def verify(req: Request):
     d=await read_json(req); u=validate_init(d.get('init_data'))
     if await asyncio.to_thread(user_status,u['id'])=='failed': return {'status':'failed'}
-    if d.get('consent') is not True: raise HTTPException(400,'Нужно согласие')
     ip=get_ip(req)
     if not ip:
         raise HTTPException(503,'Сервер не определил публичный IP. Администратору нужно проверить TRUST_PROXY и настройки прокси.')
@@ -673,6 +1010,32 @@ async def verify(req: Request):
     result,row=await asyncio.to_thread(record_check,u['id'],name,ip,fp,device,geo,platform,api_version)
     if row: await notify(log_text(row))
     return JSONResponse(result,headers={'Cache-Control':'no-store'})
+
+def require_passed(u):
+    if user_status(u['id'])!='passed': raise HTTPException(403,'Сначала пройди проверку аккаунта.')
+
+@app.post('/api/hilo/state')
+async def hilo_state(req: Request):
+    d=await read_json(req); u=validate_init(d.get('init_data')); require_passed(u)
+    return JSONResponse(await asyncio.to_thread(web_game_payload,u['id']),headers={'Cache-Control':'no-store'})
+
+@app.post('/api/hilo/start')
+async def hilo_start(req: Request):
+    d=await read_json(req); u=validate_init(d.get('init_data')); require_passed(u)
+    bet=d.get('bet')
+    if type(bet) is not int or not 10<=bet<=MAX_BET: raise HTTPException(400,'Ставка должна быть от 10 до '+fmt(MAX_BET)+'.')
+    g,error=await asyncio.to_thread(start_web_game,u['id'],bet)
+    if error: raise HTTPException(400,error)
+    return JSONResponse(await asyncio.to_thread(web_game_payload,u['id'],g),headers={'Cache-Control':'no-store'})
+
+@app.post('/api/hilo/action')
+async def hilo_web_action(req: Request):
+    d=await read_json(req); u=validate_init(d.get('init_data')); require_passed(u)
+    gid,rev,action=d.get('game_id'),d.get('rev'),d.get('action')
+    if type(gid) is not int or type(rev) is not int or action not in ('low','high','cash'): raise HTTPException(400,'Некорректный ход.')
+    g,error=await asyncio.to_thread(play_game,u['id'],gid,rev,action)
+    if not g: raise HTTPException(400,error or 'Игра не найдена.')
+    return JSONResponse(await asyncio.to_thread(web_game_payload,u['id'],g),headers={'Cache-Control':'no-store'})
 
 if __name__=='__main__':
     import uvicorn
