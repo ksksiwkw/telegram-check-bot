@@ -45,7 +45,7 @@ def db():
  finally: c.close()
 
 E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5386367538735104399','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5238132025323444613','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012618640015234346','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978','paper':'5877597667231534929','shop':'5983399041197675256','key':'5330115548900501467','trident':'5388787654022148728','tower':'5388571110361020010','donut':'5211042502651432248','hashtag':'5269493627410731513','bomb_anim':'5303112793157810087','dynamite':'5469913852462242978','top_title':'5317035505173430594','top1':'5235776368905562305','top2':'5237704680372447424','top3':'5238044171767393675','your_place':'5449758837957502787','food':'5217726154663796197','smile':'5447271008216063923','comet':'5224607267797606837','yum':'5390923103171784225','bookmark':'5222444124698853913','sun':'5402477260982731644','cherries':'5388988070081082206','cake':'5265043762119199599','weather':'5399913388845322366','trend':'5449683594425410231','downtrend':'5447183459602669338','candy':'5388647101217387586','person':'5433758796289685818'}
-ICON_FALLBACK={E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥'}
+ICON_FALLBACK={E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥',E['green']:'🟩',E['red']:'🟥'}
 INVISIBLE='\u200b'
 def esc(s): return html.escape(str(s))
 def em(key,fallback): return f'<tg-emoji emoji-id="{E.get(key,key)}">{fallback}</tg-emoji>'
@@ -84,11 +84,16 @@ async def out(m,text,keys=None,edit=False):
  try: return await send(text,keys)
  except TelegramBadRequest as exc:
   if 'message is not modified' in str(exc).lower(): return
-  plain=re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>',r'\1',text)
-  try: return await send(plain,plain_markup(keys))
+  # First retry with the original rich text and a plain keyboard. A bad button icon
+  # must not silently remove every Premium Emoji from the message itself.
+  try: return await send(text,plain_markup(keys))
   except TelegramBadRequest as retry:
    if 'message is not modified' in str(retry).lower(): return
-   raise
+   plain=re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>',r'\1',text)
+   try: return await send(plain,plain_markup(keys))
+   except TelegramBadRequest as final:
+    if 'message is not modified' in str(final).lower(): return
+    raise
 async def notify(text,keys=None):
  for uid in admin_ids():
   try: await bot.send_message(uid,text,reply_markup=keys)
@@ -225,7 +230,7 @@ async def navigation(q:CallbackQuery):
   text=profile_text(q.from_user.id,name)
  else:
   text=top_rich_text(q.from_user.id)
- await out(q.message,text,kb([[b('Назад','home','5875082500023258804')]]),True)
+ await out(q.message,text,kb([[b('Назад','home')]]),True)
 
 
 
@@ -332,7 +337,7 @@ async def games_command(m:Message): await out(m,GAMES_TITLE,games_keyboard())
 @dp.callback_query(F.data=='help:menu')
 async def help_callback(q:CallbackQuery):
  await q.answer()
- if isinstance(q.message,Message): await out(q.message,help_text(),kb([[b('Назад','home','5875082500023258804')]]),True)
+ if isinstance(q.message,Message): await out(q.message,help_text(),kb([[b('Назад','home')]]),True)
 @dp.callback_query(F.data.startswith('games:'))
 async def games_callback(q:CallbackQuery):
  await q.answer()
@@ -553,7 +558,7 @@ async def manage_admin(m:Message):
 @dp.message(F.text.regexp(r'(?i)^\s*б\s*$'))
 async def bal(m:Message):
  with db() as c: value=balance(c,m.from_user.id)
- await out(m,'<b>'+link(m.from_user.id,m.from_user.full_name)+':\n'+em('money','🥯')+' Баланс: '+fmt(value)+' бубликов</b>')
+ await out(m,'<b>'+link(m.from_user.id,m.from_user.full_name)+':\n'+em('cherries','🍒')+' Баланс: '+fmt(value)+' бубликов</b>')
 @dp.message(F.text.regexp(r'(?i)^\s*[нп]\s+\d{1,16}\s*$'))
 async def transfer_bubliks(m:Message):
  if not valid_user(m): return
@@ -599,7 +604,7 @@ def gameview(g):
   return '<b>'+em('error','❌')+' Неправильно! Выпало <code>'+card(g['card'])+'</code></b>\n<b>'+em('explode','💥')+' Вы проиграли <code>'+fmt(g['bet'])+'</code> бубликов</b>',kb([[b('Игра окончена',f'hl:{g["id"]}:{g["rev"]}:done','ok')]])
  if g['state']!='active': return '<b>Игра окончена.</b>',None
  available=min(MAX_PAY,int(Decimal(g['bet'])*two(g['mult'])))
- text='<b>'+em('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote><b>'+em('money','🥯')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('5389099885259666198','🃏')+' Карта: '+card(g['card'])+'\n'+em('5447160283959173987','✖️')+' Множитель: x'+num(g['mult'])+'\n'+em('money','🥯')+' Можно забрать: </b><code>'+fmt(available)+'</code><b> бубликов</b></blockquote>'
+ text='<b>'+em('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote><b>'+em('5389099885259666198','🃏')+' Карта: '+card(g['card'])+'\n'+em('5447160283959173987','✖️')+' Множитель: x'+num(g['mult'])+'\n'+em('money','🥯')+' Можно забрать: </b><code>'+fmt(available)+'</code><b> бубликов</b></blockquote>'
  row=[]
  for d,label,icon,style in [('low','Ниже','5447490850412074781','danger'),('high','Выше','5449683594425410231','success')]:
   k=rate(g['card'],d)
@@ -866,14 +871,14 @@ def tower_view(g):
  if g['state']=='lost':
   text='<b>'+em('tower','🏯')+' Башня · Проигрыш</b>\n\n<b>'+em('ban','🚫')+' Увы, вы подорвались…</b>\n\n<blockquote><b>'+em('gear','⚙️')+' Проиграно: </b><code>'+fmt(g['bet'])+'</code><b> бубликов</b></blockquote>'
   rows=[]
-  for f in range(8):
+  for f in range(7,-1,-1):
    row=[]
    for cell in range(5):
-    if f==g['hit_floor'] and cell==g['hit_cell']: label='💥'
-    elif masks[f]&(1<<cell): label='💣'
-    elif f<len(path) and path[f]==cell: label='🟩'
-    else: label='·'
-    row.append(b(label,f'tw:{g["id"]}:{g["rev"]}:done'))
+    if f==g['hit_floor'] and cell==g['hit_cell']: icon='explode'
+    elif masks[f]&(1<<cell): icon='mine'
+    elif f<len(path) and path[f]==cell: icon='green'
+    else: icon=None
+    row.append(b(INVISIBLE if icon else '·',f'tw:{g["id"]}:{g["rev"]}:done',icon))
    rows.append(row)
   return text,kb(rows)
  if g['state']=='paid':
@@ -881,18 +886,18 @@ def tower_view(g):
   return text,None
  text='<b>'+em('tower','🏯')+' Башня | Game On</b>\n\n<blockquote><b>👻 Кол-во мин: '+em('mine','💣')+'</b><code>'+str(count)+'</code><b>\n'+em('paper','🗒')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n🎲 Можно забрать: </b><code>'+fmt(payout)+'</code><b> бубликов\n'+em('chart','📊')+' Коэффициент: </b><code>x'+tower_mult_text(count,floor)+'</code><b>\n'+em('shop','🏪')+' Этаж: </b><code>'+str(floor)+'/8</code></blockquote>'
  rows=[]
- # Previously cleared floors stay visible; only the selected safe cell is marked.
- for f in range(floor):
+ # Telegram displays keyboard rows from top to bottom: highest/newest floor first.
+ if floor<8:
+  rows.append([b(INVISIBLE,f'tw:{g["id"]}:{g["rev"]}:{cell}','question') for cell in range(5)])
+ for f in range(floor-1,-1,-1):
   row=[]
   for cell in range(5):
-   label='🟩' if path[f]==cell else '·'
-   row.append(b(label,f'tw:{g["id"]}:{g["rev"]}:done'))
+   icon='green' if path[f]==cell else None
+   row.append(b(INVISIBLE if icon else '·',f'tw:{g["id"]}:{g["rev"]}:done',icon))
   rows.append(row)
- # Current floor: five question buttons. A safe choice reveals itself and appends next row.
- if floor<8:
-  rows.append([b('❓',f'tw:{g["id"]}:{g["rev"]}:{cell}') for cell in range(5)])
  if floor: rows.append([b('Забрать выигрыш',f'tw:{g["id"]}:{g["rev"]}:cash','crown','primary')])
  return text,kb(rows)
+
 def create_tower(uid,bet,count,chat,msg):
  with db() as c:
   c.execute('BEGIN IMMEDIATE'); allowed(c,uid)
