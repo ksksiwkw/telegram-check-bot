@@ -44,7 +44,7 @@ def db():
   c.rollback(); raise
  finally: c.close()
 
-E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5258258882022612173','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5388988070081082206','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012634003113252087','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978','paper':'5877597667231534929','shop':'5983399041197675256','key':'5330115548900501467','trident':'5388787654022148728','tower':'5388571110361020010','donut':'5211042502651432248','hashtag':'5269493627410731513','bomb_anim':'5303112793157810087','dynamite':'5469913852462242978','top_title':'5317035505173430594','top1':'5235776368905562305','top2':'5237704680372447424','top3':'5238044171767393675','your_place':'5449758837957502787','food':'5217726154663796197','smile':'5447271008216063923','comet':'5224607267797606837','yum':'5390923103171784225','bookmark':'5222444124698853913','sun':'5402477260982731644','cherries':'5388988070081082206','cake':'5265043762119199599'}
+E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5386367538735104399','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5238132025323444613','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012618640015234346','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978','paper':'5877597667231534929','shop':'5983399041197675256','key':'5330115548900501467','trident':'5388787654022148728','tower':'5388571110361020010','donut':'5211042502651432248','hashtag':'5269493627410731513','bomb_anim':'5303112793157810087','dynamite':'5469913852462242978','top_title':'5317035505173430594','top1':'5235776368905562305','top2':'5237704680372447424','top3':'5238044171767393675','your_place':'5449758837957502787','food':'5217726154663796197','smile':'5447271008216063923','comet':'5224607267797606837','yum':'5390923103171784225','bookmark':'5222444124698853913','sun':'5402477260982731644','cherries':'5388988070081082206','cake':'5265043762119199599','weather':'5399913388845322366','trend':'5449683594425410231','downtrend':'5447183459602669338','candy':'5388647101217387586','person':'5433758796289685818'}
 ICON_FALLBACK={E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥'}
 INVISIBLE='\u200b'
 def esc(s): return html.escape(str(s))
@@ -221,7 +221,8 @@ async def navigation(q:CallbackQuery):
  if not isinstance(q.message,Message): return
  if q.data=='home': await out(q.message,WELCOME,menu(q.message.chat.type=='private'),True); return
  if q.data=='profile':
-  text=profile_text(q.from_user.id,q.from_user.full_name)
+  name='@'+q.from_user.username if q.from_user.username else q.from_user.full_name
+  text=profile_text(q.from_user.id,name)
  else:
   text=top_rich_text(q.from_user.id)
  await out(q.message,text,kb([[b('Назад','home','5875082500023258804')]]),True)
@@ -253,15 +254,15 @@ def profile_text(uid,name):
   wallet=c.execute('SELECT amount FROM bublins_v1 WHERE uid=?',(uid,)).fetchone()
   coins=wallet['amount'] if wallet else 0
   grams=food['total_grams'] if food else 0
- return ('<b>👤 Профиль: '+link(uid,name)+'</b>\\n\\n'
-         +'<b>💸 Сумма ставок: '+fmt(bet_total)+' бубликов\\n'
-         +'📈 Выиграно: '+fmt(won)+' бубликов\\n'
-         +'📉 Проиграно: '+fmt(lost)+' бубликов\\n\\n'
-         +em('bookmark','🔖')+' Всего сыграно: '+fmt(games)+' игр\\n'
-         +em('sun','☀️')+' Выиграно: '+fmt(wins_count)+' игр\\n'
-         +'🌧 Проиграно: '+fmt(loss_count)+' игр\\n\\n'
-         +em('cake','🎂')+' Съедено в кафешке: '+format(grams/1000,'.2f').replace('.',',')+'кг\\n\\n'
-         +em('cherries','🍒')+' Баланс: '+fmt(bal)+' бубликов\\n'
+ return ('<b>'+em('person','👤')+' Профиль: '+link(uid,name)+'</b>\n\n'
+         +'<b>'+em('money','💸')+' Сумма ставок: '+fmt(bet_total)+' бубликов\n'
+         +em('trend','📈')+' Выиграно: '+fmt(won)+' бубликов\n'
+         +em('downtrend','📉')+' Проиграно: '+fmt(lost)+' бубликов\n\n'
+         +em('bookmark','🔖')+' Всего сыграно: '+fmt(games)+' игр\n'
+         +em('sun','☀️')+' Выиграно: '+fmt(wins_count)+' игр\n'
+         +em('weather','🌧')+' Проиграно: '+fmt(loss_count)+' игр\n\n'
+         +em('cake','🎂')+' Съедено в кафешке: '+format(grams/1000,'.2f').replace('.',',')+'кг\n\n'
+         +em('cherries','🍒')+' Баланс: '+fmt(bal)+' бубликов\n'
          +em('donut','🍩')+' Бублин-коины: '+fmt(coins)+' коинов</b>')
 
 def top_rich_text(uid):
@@ -273,7 +274,7 @@ def top_rich_text(uid):
  lines=[]
  for i,r in enumerate(rows):
   lines.append(em(medals[i],str(i+1))+' '+link(r['id'],r['name'][:55])+' — <b>'+fmt(r['amount'])+'</b> '+em('cherries','🍒'))
- return '<b>'+em('top_title','🏆')+' ТОП БОГАЧЕЙ</b>\\n\\n<blockquote><b>'+'\\n'.join(lines)+'</b></blockquote>\\n\\n<b>'+em('your_place','📍')+' Ваше место: '+fmt(rank)+' — '+fmt(mine)+'</b>'
+ return '<b>'+em('top_title','🏆')+' ТОП БОГАЧЕЙ</b>\n\n<blockquote><b>'+'\n'.join(lines)+'</b></blockquote>\n\n<b>'+em('your_place','📍')+' Ваше место: '+fmt(rank)+' — '+fmt(mine)+'</b>'
 
 # Rake bonus: 5% of finally lost wagers.
 RAKE_RATE=Decimal('0.05')
@@ -364,7 +365,8 @@ async def bonus(m:Message):
   await out(m,'<b>'+em('clock','⏲')+f' Подождите еще {hours}ч{minutes:02d}м{seconds:02d}с чтобы получить бонус еще раз</b>')
 @dp.message(F.text.regexp(r'(?i)^\s*(профиль|проф)\s*$'))
 async def profile_command(m:Message):
- await out(m,profile_text(m.from_user.id,m.from_user.full_name))
+ name='@'+m.from_user.username if m.from_user.username else m.from_user.full_name
+ await out(m,profile_text(m.from_user.id,name))
 
 @dp.message(F.text.regexp(r'(?i)^\s*топ\s+б\s*$'))
 async def top_balance(m:Message):
@@ -374,7 +376,7 @@ async def top_balance(m:Message):
 # Food rewards and relationship HP
 def remaining_text(seconds):
  seconds=max(0,int(seconds)); hours,rem=divmod(seconds,3600); minutes=rem//60
- return f'⌛ Через {hours}ч. {minutes}мин.' if hours else f'⌛ Через {minutes}мин.'
+ return (em('clock','⌛')+' Через '+f'{hours}ч. {minutes}мин.') if hours else (em('clock','⌛')+' Через '+f'{minutes}мин.')
 
 @dp.message(F.text.regexp(r'(?i)^\s*кд\s*$'))
 async def cooldown_command(m:Message):
@@ -384,9 +386,9 @@ async def cooldown_command(m:Message):
   eat=c.execute('SELECT last_eat FROM eat_cooldown_v1 WHERE uid=?',(uid,)).fetchone()
  bonus_left=max(0,bonus['last_claim']+BONUS_SECONDS-now) if bonus else 0
  eat_left=max(0,eat['last_eat']+EAT_SECONDS-now) if eat else 0
- bonus_text='✅ Доступен' if not bonus_left else '<b>'+remaining_text(bonus_left)+'</b>'
- eat_text='✅ Доступно' if not eat_left else '<b>'+remaining_text(eat_left)+'</b>'
- await out(m,'<b>'+em('gift','🎁')+' Бонус: '+bonus_text+'\\n'+em('cake','🎂')+' Похавать: '+eat_text+'</b>')
+ bonus_text='✅ Доступен' if not bonus_left else remaining_text(bonus_left)
+ eat_text='✅ Доступно' if not eat_left else remaining_text(eat_left)
+ await out(m,'<blockquote><b>'+em('gift','🎁')+' Бонус: '+bonus_text+'\n'+em('cake','🎂')+' Похавать: '+eat_text+'</b></blockquote>')
 
 @dp.message(F.text.regexp(r'(?i)^\s*похавать\s*$'))
 async def eat_command(m:Message):
@@ -404,9 +406,9 @@ async def eat_command(m:Message):
    c.execute('INSERT INTO eat_cooldown_v1(uid,last_eat) VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET last_eat=excluded.last_eat',(uid,now))
    total=c.execute('SELECT total_grams,total_coins FROM eat_v1 WHERE uid=?',(uid,)).fetchone()
   kg,rem=divmod(total['total_grams'],1000)
-  text=('<b>'+em('food','🍔')+' Отлично посидели в кафешке и набрали '+f'{grams/1000:.2f}'+'кг\\n'
-        +em('donut','🍩')+' Бублин-коины: +'+fmt(coins)+' Бубликов\\n\\n'
-        +'🍬 Всего съедено: '+str(kg)+','+f'{rem:03d}'+'кг\\n'
+  text=('<b>'+em('food','🍔')+' Отлично посидели в кафешке и набрали '+f'{grams/1000:.2f}'+'кг\n'
+        +em('donut','🍩')+' Бублин-коины: +'+fmt(coins)+' Бубликов\n\n'
+        +em('candy','🍬')+' Всего съедено: '+str(kg)+','+f'{rem:03d}'+'кг\n'
         +'· '+em('donut','🍩')+' Бублин-коины: '+fmt(total['total_coins'])+'</b>')
   await out(m,text)
  except ValueError as e: await out(m,error_text(e))
@@ -429,7 +431,7 @@ async def eat_together(m:Message):
    c.execute('UPDATE bublins_v1 SET amount=amount-? WHERE uid=?',(hp,uid))
    c.execute('INSERT INTO relationship_v1(uid1,uid2,hp) VALUES(?,?,?) ON CONFLICT(uid1,uid2) DO UPDATE SET hp=hp+excluded.hp',(first,second,hp))
    total=c.execute('SELECT hp FROM relationship_v1 WHERE uid1=? AND uid2=?',(first,second)).fetchone()['hp']
-  await out(m,'<b>'+em('food','🍔')+' Хорошо посидели\\n'+em('smile','🙂')+' +'+fmt(hp)+' HP отношений\\n\\n'+em('comet','☄️')+' HP: '+fmt(total)+'/♾️\\nДержите тонус. дальше больше. жирные свиньи.\\n'+em('yum','😋')+'</b>')
+  await out(m,'<b>'+em('food','🍔')+' Хорошо посидели\n'+em('smile','🙂')+' +'+fmt(hp)+' HP отношений\n\n'+em('comet','☄️')+' HP: '+fmt(total)+'/♾️\nДержите тонус. дальше больше. жирные свиньи.\n'+em('yum','😋')+'</b>')
  except ValueError as e: await out(m,error_text(e))
 
 # Admin panel. Recovery moderation and appeals remain available when blocked.
@@ -858,36 +860,39 @@ def tower_mult_text(count,floor): return '1.0' if floor==0 else format(Decimal(s
 def tower_payout(g,floor=None):
  floor=g['floor'] if floor is None else floor
  return min(MAX_PAY,int(Decimal(g['bet'])*Decimal(str(tower_mult(g['mine_count'],floor)))))
-def tower_board(g):
- masks=json.loads(g['mine_masks']); path=json.loads(g['path']); lines=[]
- for floor in range(8):
-  if floor<len(path) or g['state'] in ('lost','paid'):
-   mask=masks[floor]
-   cells=[]
-   for cell in range(5):
-    if mask&(1<<cell): icon=em('mine','💣')
-    elif floor<len(path) and path[floor]==cell: icon=em('money','💰')
-    else: icon=em('diamond','💎')
-    if g['state']=='lost' and g['hit_floor']==floor and g['hit_cell']==cell: icon=em('explode','💥')
-    cells.append(icon)
-   lines.append(' '.join(cells))
-  elif floor==g['floor'] and g['state']=='active': lines.append('▫️ ▫️ ▫️ ▫️ ▫️')
-  else: lines.append('▫️ ▫️ ▫️ ▫️ ▫️')
- return '\n'.join(lines)
 def tower_view(g):
- count=g['mine_count']; floor=g['floor']; mult=tower_mult(count,floor); payout=tower_payout(g)
+ count=g['mine_count']; floor=g['floor']; payout=tower_payout(g)
+ path=json.loads(g['path']); masks=json.loads(g['mine_masks'])
  if g['state']=='lost':
-  text='<b>'+em('tower','🏯')+' Башня · Проигрыш</b>\n\n<b>'+em('ban','🚫')+' Увы, вы подорвались…</b>\n\n<blockquote><b>'+em('gear','⚙️')+' Проиграно: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('paper','📄')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов</b></blockquote>\n'+tower_board(g)
-  return text,kb([[b('Игра окончена','tw:'+str(g['id'])+':'+str(g['rev'])+':done','ok')]])
+  text='<b>'+em('tower','🏯')+' Башня · Проигрыш</b>\n\n<b>'+em('ban','🚫')+' Увы, вы подорвались…</b>\n\n<blockquote><b>'+em('gear','⚙️')+' Проиграно: </b><code>'+fmt(g['bet'])+'</code><b> бубликов</b></blockquote>'
+  rows=[]
+  for f in range(8):
+   row=[]
+   for cell in range(5):
+    if f==g['hit_floor'] and cell==g['hit_cell']: label='💥'
+    elif masks[f]&(1<<cell): label='💣'
+    elif f<len(path) and path[f]==cell: label='🟩'
+    else: label='·'
+    row.append(b(label,f'tw:{g["id"]}:{g["rev"]}:done'))
+   rows.append(row)
+  return text,kb(rows)
  if g['state']=='paid':
-  text='<b>'+em('ok','✔️')+' Забран приз • Башня</b>\n\n<blockquote><b>'+em('paper','📄')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('chart','📈')+' Выиграно: </b><code>'+fmt(g['payout'])+'</code><b> бубликов</b></blockquote>\n'+tower_board(g)
+  text='<b>'+em('ok','✔️')+' Забран приз • Башня</b>\n\n<blockquote><b>'+em('paper','📄')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('chart','📈')+' Выиграно: </b><code>'+fmt(g['payout'])+'</code><b> бубликов</b></blockquote>'
   return text,None
- text='<b>'+em('tower','🏯')+' Башня | Game On</b>\n\n<blockquote><b>👻 Кол-во мин: '+em('mine','💣')+'</b><code>'+str(count)+'</code><b>\n'+em('paper','🗒')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n🎲 Можно забрать: </b><code>'+fmt(payout)+'</code><b> бубликов\n'+em('chart','📊')+' Коэффициент: </b><code>x'+tower_mult_text(count,floor)+'</code><b>\n'+em('shop','🏪')+' Этаж: </b><code>'+str(floor)+'/8</code></blockquote>\n'+tower_board(g)
+ text='<b>'+em('tower','🏯')+' Башня | Game On</b>\n\n<blockquote><b>👻 Кол-во мин: '+em('mine','💣')+'</b><code>'+str(count)+'</code><b>\n'+em('paper','🗒')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n🎲 Можно забрать: </b><code>'+fmt(payout)+'</code><b> бубликов\n'+em('chart','📊')+' Коэффициент: </b><code>x'+tower_mult_text(count,floor)+'</code><b>\n'+em('shop','🏪')+' Этаж: </b><code>'+str(floor)+'/8</code></blockquote>'
  rows=[]
- for cell in range(5): rows.append(b(INVISIBLE,f'tw:{g["id"]}:{g["rev"]}:{cell}','question'))
- keys=[rows]
- if floor: keys.append([b('Забрать выигрыш',f'tw:{g["id"]}:{g["rev"]}:cash','crown','primary')])
- return text,kb(keys)
+ # Previously cleared floors stay visible; only the selected safe cell is marked.
+ for f in range(floor):
+  row=[]
+  for cell in range(5):
+   label='🟩' if path[f]==cell else '·'
+   row.append(b(label,f'tw:{g["id"]}:{g["rev"]}:done'))
+  rows.append(row)
+ # Current floor: five question buttons. A safe choice reveals itself and appends next row.
+ if floor<8:
+  rows.append([b('❓',f'tw:{g["id"]}:{g["rev"]}:{cell}') for cell in range(5)])
+ if floor: rows.append([b('Забрать выигрыш',f'tw:{g["id"]}:{g["rev"]}:cash','crown','primary')])
+ return text,kb(rows)
 def create_tower(uid,bet,count,chat,msg):
  with db() as c:
   c.execute('BEGIN IMMEDIATE'); allowed(c,uid)
