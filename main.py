@@ -10,7 +10,7 @@ with direct access to application blocked. Otherwise leave 0.
 """
 import asyncio, hashlib, hmac, html, ipaddress, json, logging, math, os, re, secrets, sqlite3, time
 from contextlib import contextmanager, asynccontextmanager
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -44,7 +44,7 @@ def db():
   c.rollback(); raise
  finally: c.close()
 
-E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5258258882022612173','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5388988070081082206','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012634003113252087','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978'}
+E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5258258882022612173','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5388988070081082206','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012634003113252087','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978','paper':'5877597667231534929','shop':'5983399041197675256','key':'5330115548900501467','trident':'5388787654022148728','tower':'5388571110361020010','donut':'5211042502651432248','hashtag':'5269493627410731513','bomb_anim':'5303112793157810087','dynamite':'5469913852462242978'}
 ICON_FALLBACK={E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥'}
 INVISIBLE='\u200b'
 def esc(s): return html.escape(str(s))
@@ -124,6 +124,10 @@ def init():
   CREATE TABLE IF NOT EXISTS rake_v1(uid INTEGER PRIMARY KEY,amount INTEGER NOT NULL DEFAULT 0 CHECK(amount>=0));
   CREATE TABLE IF NOT EXISTS bot_admins_v1(uid INTEGER PRIMARY KEY,added_by INTEGER NOT NULL DEFAULT 0,added_at INTEGER NOT NULL DEFAULT 0);
   CREATE TABLE IF NOT EXISTS bot_admin_revoked_v1(uid INTEGER PRIMARY KEY);
+  CREATE TABLE IF NOT EXISTS gold_v1(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER NOT NULL,bet INTEGER NOT NULL,step INTEGER NOT NULL DEFAULT 0,traps TEXT NOT NULL,seed TEXT NOT NULL,hash TEXT NOT NULL,path TEXT NOT NULL DEFAULT '[]',state TEXT NOT NULL DEFAULT 'active',rev INTEGER NOT NULL DEFAULT 0,payout INTEGER NOT NULL DEFAULT 0,chat INTEGER NOT NULL,msg INTEGER NOT NULL,created INTEGER NOT NULL,UNIQUE(chat,msg));
+  CREATE UNIQUE INDEX IF NOT EXISTS gold_active_v1 ON gold_v1(uid) WHERE state='active';
+  CREATE TABLE IF NOT EXISTS tower_v1(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER NOT NULL,bet INTEGER NOT NULL,mine_count INTEGER NOT NULL CHECK(mine_count BETWEEN 1 AND 4),floor INTEGER NOT NULL DEFAULT 0,mine_masks TEXT NOT NULL,path TEXT NOT NULL DEFAULT '[]',hit_floor INTEGER,hit_cell INTEGER,state TEXT NOT NULL DEFAULT 'active',rev INTEGER NOT NULL DEFAULT 0,payout INTEGER NOT NULL DEFAULT 0,chat INTEGER NOT NULL,msg INTEGER NOT NULL,created INTEGER NOT NULL,UNIQUE(chat,msg));
+  CREATE UNIQUE INDEX IF NOT EXISTS tower_active_v1 ON tower_v1(uid) WHERE state='active';
   CREATE INDEX IF NOT EXISTS balance_top_v1 ON balances(amount DESC,uid);
   ''')
   for admin_id in ADMINS:
@@ -154,6 +158,20 @@ def change(c,uid,delta):
  if value<0: raise ValueError('Недостаточно средств')
  if value>MAX_BAL: raise ValueError('Превышен лимит баланса. Обратись к администратору.')
  c.execute('UPDATE balances SET amount=? WHERE uid=?',(value,uid)); return value
+
+def active_game(uid):
+ with db() as c:
+  for table,key in [('app_hilo_v6','hilo'),('mines_v1','mines'),('gold_v1','gold'),('tower_v1','tower')]:
+   row=c.execute(f"SELECT * FROM {table} WHERE uid=? AND state='active'",(uid,)).fetchone()
+   if row: return key,dict(row)
+ return None,None
+
+def active_game_notice(uid):
+ key,g=active_game(uid)
+ if not key: return None,None
+ names={'hilo':'Хило','mines':'Мины','gold':'Золото','tower':'Башня'}
+ return '<b>'+em('notice','❗')+' У вас уже есть текущая игра: '+names[key]+'. Продолжите её или заберите выигрыш.</b>',kb([[b('Продолжить',f'resume:{key}:{g["id"]}','repeat')]])
+
 def once(c,m):
  if c.execute('SELECT 1 FROM command9 WHERE chat=? AND msg=?',(m.chat.id,m.message_id)).fetchone(): raise ValueError('Команда уже обработана.')
  c.execute('INSERT INTO command9 VALUES(?,?)',(m.chat.id,m.message_id))
@@ -217,7 +235,7 @@ def rake_view(uid):
   row=c.execute('SELECT amount FROM rake_v1 WHERE uid=?',(uid,)).fetchone()
  amount=row['amount'] if row else 0
  text='<b>'+em('bonus','🎁')+' Рейк-бонус\n\n'+em('money','🥯')+' Доступно: '+fmt(amount)+' бубликов\n'+em('face','🥃')+' Вы получаете 5% с окончательно проигранных бубликов</b>'
- key=b('Забрать' if amount else 'Нет','rake:claim' if amount else 'rake:none','bonusgift' if amount else 'none')
+ key=b('Забрать' if amount else 'Нету','rake:claim' if amount else 'rake:none','bonusgift' if amount else 'none','success' if amount else None)
  return text,kb([[key]])
 @dp.message(F.text.regexp(r'(?i)^\s*рейк\s*$'))
 async def rake_command(m:Message):
@@ -243,12 +261,14 @@ async def rake_callback(q:CallbackQuery):
 
 # Help: requested compact layout, without admin commands.
 def help_text(uid=None):
- return '<b>'+em('clip','📎')+' Помощь</b>\n\n<blockquote>'+em('check','⚙')+' <code>/start</code><b> — запустить бота/главное меню</b>\n'+em('chat','💬')+' <code>б</code><b> — отобразить баланс</b>\n'+em('notice','❗️')+' <code>помощь</code><b> / </b><code>игры</code><b> — навигация</b>\n'+em('pin','📌')+' <code>/appeal</code><b> — апелляция на бан в боте</b>\n'+em('bonusgift','🎁')+' <code>бонус</code><b> — получить доп. валюту</b>\n'+em('bonus','🎁')+' <code>рейк</code><b> — рейк-бонус</b>\n'+em('map','🗺')+' <code>топ б</code><b> — топеры в боте по балансу</b></blockquote>'
-def games_keyboard(): return kb([[b('Хило','games:hilo','5447327564345416222')],[b('Мины','games:mines','mine_start')],[b('Рулетка','games:roulette','wheel')],[b('Главное меню','home','5875082500023258804')]])
+ return '<b>'+em('clip','📎')+' Помощь</b>\n\n<blockquote>'+em('check','⚙')+' <code>/start</code><b> — запустить бота/главное меню</b>\n'+em('chat','💬')+' <code>б</code><b> — отобразить баланс</b>\n'+em('notice','❗️')+' <code>помощь</code><b> / </b><code>игры</code><b> — навигация</b>\n'+em('pin','📌')+' <code>/appeal</code><b> — апелляция на бан в боте</b>\n'+em('bonusgift','🎁')+' <code>бонус</code><b> — получить доп. валюту</b>\n'+em('bonus','🎁')+' <code>рейк</code><b> — рейк-бонус</b>\n'+em('map','🗺')+' <code>топ б</code><b> — топеры в боте по балансу</b>\n'+em('money','💸')+' <code>Н [сумма]</code><b> / </b><code>П [сумма]</code><b> — передать бублики ответом на сообщение</b></blockquote>'
+def games_keyboard(): return kb([[b('Хило','games:hilo','5447327564345416222')],[b('Мины','games:mines','mine_start')],[b('Золото','games:gold','trident')],[b('Башня','games:tower','tower')],[b('Рулетка','games:roulette','wheel')],[b('Главное меню','home','5875082500023258804')]])
 GAME_RULES={
 'hilo':'<b>'+em('5447327564345416222','🎴')+' Хило | Help game</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>хило [ставка]</code>\n\n<b>'+em('search','🔍')+' Главная задача в карточной игре HiLo — угадать следующую карту: будет она выше текущей или ниже?\nЕсли вы угадаете, вы можете забрать выигрыш или продолжить.</b>',
 'roulette':'<b>'+em('wheel','🎡')+' Рулетка | Help games</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>[сумма] [тип ставки]</code>\n\n<b>'+em('down','⬇️')+' Типы ставок:</b>\n'+em('gear','⚙️')+' <code>к | ч</code><b> — x1.98</b>\n'+em('gear','⚙️')+' <code>одд | евен</code><b> — x1.98</b>\n'+em('gear','⚙️')+' <code>0–36</code><b> (одно число) — x35.98</b>\n'+em('gear','⚙️')+' <code>1-18 | 19-36</code><b> — x1.98</b>',
-'mines':'<b>'+em('mine_start','💣')+' Мины | Help games</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>мины [сумма] [кол-во]</code>\n\n<b>'+em('search','🔍')+' Главная задача — не подорваться на мине и забрать главный приз.</b>'}
+'mines':'<b>'+em('mine_start','💣')+' Мины | Help games</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>мины [сумма] [кол-во]</code>\n\n<b>'+em('search','🔍')+' Главная задача — не подорваться на мине и забрать главный приз.</b>',
+'gold':'<b>'+em('trident','🔱')+' Золото | Help game</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>золото [ставка]</code>\n\n<b>Выбирай одну из двух сторон на каждом шаге, избегай 💥 и забирай выигрыш.</b>',
+ 'tower':'<b>'+em('tower','🏯')+' Башня | Help game</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>башня [сумма] [мины 1-4]</code>\n\n<b>'+em('search','🔍')+' Главная задача: пройти все уровни и не нарваться ни на единую ловушку, чтобы забрать выигрыш.</b>'}
 GAMES_TITLE='<b>'+em('crown','🎮')+' Игры</b>\n\n<blockquote><b>Выбери игру, чтобы посмотреть правила и команды.</b></blockquote>'
 @dp.message(Command('help','помощь'))
 @dp.message(F.text.regexp(r'(?i)^\s*помощь\s*$'))
@@ -424,6 +444,22 @@ async def manage_admin(m:Message):
 async def bal(m:Message):
  with db() as c: value=balance(c,m.from_user.id)
  await out(m,'<b>'+link(m.from_user.id,m.from_user.full_name)+':\n'+em('money','🥯')+' Баланс: '+fmt(value)+' бубликов</b>')
+@dp.message(F.text.regexp(r'(?i)^\s*[нп]\s+\d{1,16}\s*$'))
+async def transfer_bubliks(m:Message):
+ if not valid_user(m): return
+ if not m.reply_to_message or not valid_user(m.reply_to_message):
+  await out(m,'<b>'+em('error','❗')+' Ответь командой Н [сумма] или П [сумма] на сообщение получателя.</b>'); return
+ target=m.reply_to_message.from_user; amount=int(m.text.split()[1]); uid=m.from_user.id
+ if amount<1 or amount>MAX_BAL: await out(m,error_text('Некорректная сумма передачи')); return
+ if target.id==uid: await out(m,error_text('Нельзя передать бублики самому себе')); return
+ try:
+  with db() as c:
+   c.execute('BEGIN IMMEDIATE'); allowed(c,uid); allowed(c,target.id)
+   change(c,uid,-amount); change(c,target.id,amount)
+   c.execute('INSERT INTO app_audit_v6(actor,uid,ts,action) VALUES(?,?,?,?)',(uid,target.id,int(time.time()),f'transfer {amount} from {uid}'))
+  await out(m,'<b>'+em('money','🥯')+' '+link(uid,m.from_user.full_name)+' передал <code>'+fmt(amount)+'</code> бубликов '+link(target.id,target.full_name)+'</b>')
+ except ValueError as e: await out(m,error_text(e))
+
 @dp.message(Command('give','take'))
 async def give(m:Message):
  if not valid_user(m) or not is_admin(m.from_user.id): return
@@ -448,16 +484,18 @@ def rate(n,d):
  return two(Decimal('12.5')/count) if count else None
 HELP='<b>'+em('5886436057091673541','🎴')+' Хило [ N ]\n'+em('5897846616966041652','🔮')+' Угадать последовательность: Выше | Ниже от Туза (1) До короля(13)</b>'
 def gameview(g):
- if g['state']=='paid': return '<b>'+em('ok','✅')+' Успешно</b>\n\n<blockquote><b>'+em('money','🥯')+' '+fmt(g['payout'])+' бубликов</b></blockquote>',None
- if g['state']!='active': return '<b>'+em('5283283384418707920','❌')+' Неправильно! Выпало: '+card(g['card'])+'</b>',None
+ if g['state']=='paid': return '<b>'+em('ok','✅')+' Выигрыш забран!</b>\n\n<blockquote><b>'+em('money','🥯')+' Выиграно: </b><code>'+fmt(g['payout'])+'</code><b> бубликов</b></blockquote>',None
+ if g['state']=='lost':
+  return '<b>'+em('error','❌')+' Неправильно! Выпало <code>'+card(g['card'])+'</code></b>\n<b>'+em('explode','💥')+' Вы проиграли <code>'+fmt(g['bet'])+'</code> бубликов</b>',kb([[b('Игра окончена',f'hl:{g["id"]}:{g["rev"]}:done','ok')]])
+ if g['state']!='active': return '<b>Игра окончена.</b>',None
  available=min(MAX_PAY,int(Decimal(g['bet'])*two(g['mult'])))
- text='<b>'+em('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote><b>'+em('5389099885259666198','🃏')+' Карта: '+card(g['card'])+'\n'+em('5447160283959173987','✖️')+' Множитель: x'+num(g['mult'])+'\n'+em('money','🥯')+' Можно забрать: '+fmt(available)+' бубликов</b></blockquote>'
+ text='<b>'+em('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote><b>'+em('money','🥯')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('5389099885259666198','🃏')+' Карта: '+card(g['card'])+'\n'+em('5447160283959173987','✖️')+' Множитель: x'+num(g['mult'])+'\n'+em('money','🥯')+' Можно забрать: </b><code>'+fmt(available)+'</code><b> бубликов</b></blockquote>'
  row=[]
  for d,label,icon,style in [('low','Ниже','5447490850412074781','danger'),('high','Выше','5449683594425410231','success')]:
   k=rate(g['card'],d)
   if k: row.append(b(label+' x'+num(k),f'hl:{g["id"]}:{g["rev"]}:{d}',icon,style))
  rows=[row]
- if g['wins']: rows.append([b('Забрать '+fmt(min(MAX_PAY,int(Decimal(g['bet'])*two(g['mult'])))),f'hl:{g["id"]}:{g["rev"]}:cash','5447184078077992135','success')])
+ if g['wins']: rows.append([b('Забрать выигрыш x'+num(g['mult']),f'hl:{g["id"]}:{g["rev"]}:cash','5447184078077992135','success')])
  return text,kb(rows)
 @dp.message(F.text.regexp(r'(?i)^\s*(хл|хило)(?:\s.*)?$'))
 async def hilo(m:Message):
@@ -467,6 +505,8 @@ async def hilo(m:Message):
  with db() as c: active=c.execute("SELECT * FROM app_hilo_v6 WHERE uid=? AND state='active'",(uid,)).fetchone()
  if active:
   text,keys=gameview(active); await out(m,text,keys); return
+ other,notice=active_game_notice(uid)
+ if other: await out(m,other,notice); return
  if len(p)!=2: await out(m,HELP); return
  try:
   with db() as c:
@@ -481,11 +521,13 @@ async def hilo(m:Message):
 @dp.callback_query(F.data.startswith('hl:'))
 async def hilo_step(q:CallbackQuery):
  try:
-  _,gid,rev,action=q.data.split(':'); gid=int(gid); rev=int(rev)
+  _,gid,rev,action=q.data.split(':'); gid=int(gid); rev=int(rev); tie=False
   with db() as c:
    c.execute('BEGIN IMMEDIATE'); allowed(c,q.from_user.id)
    g=c.execute('SELECT * FROM app_hilo_v6 WHERE id=?',(gid,)).fetchone()
    if not g or g['uid']!=q.from_user.id: raise ValueError('Это не твоя игра.')
+   if g['state']=='lost' and action=='done':
+    await q.answer(); return
    if g['state']=='active' and g['rev']==rev:
     if action=='cash':
      if not g['wins']: raise ValueError('Сначала сделай успешный ход.')
@@ -494,15 +536,17 @@ async def hilo_step(q:CallbackQuery):
     elif action in ('low','high'):
      k=rate(g['card'],action)
      if k is None: raise ValueError('Невозможный ход.')
-     n=secrets.choice([value for value in range(1,14) if value!=g['card']]); win=n<g['card'] if action=='low' else n>g['card']
-     if win:
+     n=secrets.randbelow(13)+1; win=n<g['card'] if action=='low' else n>g['card']
+     if n==g['card']:
+      tie=True; c.execute('UPDATE app_hilo_v6 SET rev=rev+1 WHERE id=?',(gid,))
+     elif win:
       mult=two(min(two(g['mult'])*k,Decimal(MAX_PAY)/g['bet']))
       c.execute('UPDATE app_hilo_v6 SET card=?,mult=?,wins=wins+1,rev=rev+1 WHERE id=?',(n,num(mult),gid))
      else:
        c.execute("UPDATE app_hilo_v6 SET card=?,state='lost',rev=rev+1 WHERE id=?",(n,gid)); add_rake(c,g['uid'],g['bet'])
     else: raise ValueError('Неизвестное действие.')
    g=c.execute('SELECT * FROM app_hilo_v6 WHERE id=?',(gid,)).fetchone()
-  await q.answer(); text,keys=gameview(g)
+  await q.answer('Выпала такая же карта — это ничья, вы не проиграли.' if tie else None); text,keys=gameview(g)
   if isinstance(q.message,Message): await out(q.message,text,keys,True)
  except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
 
@@ -558,6 +602,8 @@ async def mines(m:Message):
   if bet>MAX_BET or not 1<=count<=24: await out(m,MINES_HELP); return
  with db() as c: active=c.execute("SELECT * FROM mines_v1 WHERE uid=? AND state='active'",(uid,)).fetchone()
  if active: text,keys=mineview(active); await out(m,text,keys); return
+ other,notice=active_game_notice(uid)
+ if other: await out(m,other,notice); return
  if len(p)==1: await out(m,MINES_HELP); return
  try:
   g=create_mines(uid,bet,count,m.chat.id,m.message_id); text,keys=mineview(g); await out(m,text,keys)
@@ -593,6 +639,217 @@ async def mines_step(q:CallbackQuery):
   await q.answer(note); text,keys=mineview(g); await out(q.message,text,keys,True)
  except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
 
+# Gold: 12 two-choice levels with a committed SHA-256 seed.
+def gold_multiplier(step): return 2 ** step
+def gold_payout(g,step=None):
+ step=g['step'] if step is None else step
+ return min(MAX_PAY,int(g['bet']*gold_multiplier(step)))
+def gold_board(g):
+ traps=json.loads(g['traps']); path=json.loads(g['path']); lines=[]
+ reveal=g['state'] in ('lost','paid')
+ for level in range(12,0,-1):
+  idx=level-1; payout=min(MAX_PAY,g['bet']*gold_multiplier(level))
+  if reveal or idx < len(path):
+   trap=traps[idx]; chosen=path[idx] if idx<len(path) else None
+   left=em('dynamite','🧨') if trap==0 else (em('money','💰') if chosen==0 else em('paper','🧻'))
+   right=em('dynamite','🧨') if trap==1 else (em('money','💰') if chosen==1 else em('paper','🧻'))
+   if g['state']=='lost' and idx==len(path)-1:
+    left=em('explode','💥') if trap==0 else em('paper','🧻'); right=em('explode','💥') if trap==1 else em('paper','🧻')
+  else: left=right=em('question','❓')
+  lines.append(f'| {left} | {right} | <code>{fmt(payout)}</code><b> бубликов (</b><code>{gold_multiplier(level)}x</code><b>)</b>')
+ return '\n'.join(lines)
+def gold_view(g):
+ who='<b>'+link(g['uid'],user_name(g['uid']))+'</b>'
+ if g['state']=='lost':
+  title='<b>'+em('explode','💥')+' Золото · Loss</b>'
+  text=who+'\n'+title+'\n<code>···················</code>\n<b>'+em('paper','🧻')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('trident','🔱')+' Шагов: </b><code>'+str(g['step'])+'</code><b> из 12</b>\n\n'+gold_board(g)
+  return text,kb([[b('Игра окончена','gl:'+str(g['id'])+':'+str(g['rev'])+':done','ok')],[b('Честность','gl:'+str(g['id'])+':'+str(g['rev'])+':honest','key')]])
+ if g['state']=='paid':
+  text=who+'\n<b>'+em('crown','👑')+' Золото · Победа! '+em('ok','✔️')+'</b>\n<code>···················</code>\n<b>🔱 Пройдено: </b><code>'+str(g['step'])+' из 12</code><b>\n💰 Выигрыш: </b><code>'+fmt(g['payout'])+'</code><b> бубликов (</b><code>x'+str(gold_multiplier(g['step']))+'</code><b>)</b>\n\n'+gold_board(g)
+  return text,kb([[b('Честность','gl:'+str(g['id'])+':'+str(g['rev'])+':honest','key')]])
+ step=g['step']; payout=gold_payout(g)
+ text='<b>'+em('trident','🔱')+' Золото | Games Rulka</b>\n\n<blockquote><b>'+em('paper','🧻')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n🪤 Выигрыш: </b><code>x'+str(gold_multiplier(step))+'</code><b> | </b><code>'+fmt(payout)+'</code><b> бубликов</b></blockquote>\n'+gold_board(g)
+ rows=[[b(INVISIBLE,f'gl:{g["id"]}:{g["rev"]}:0','question'),b(INVISIBLE,f'gl:{g["id"]}:{g["rev"]}:1','question')]]
+ if step: rows.append([b('Забрать выигрыш',f'gl:{g["id"]}:{g["rev"]}:cash','donut','success')])
+ bottom=[b('Честность',f'gl:{g["id"]}:{g["rev"]}:honest','key')]
+ if step==0: bottom.append(b('Отменить',f'gl:{g["id"]}:{g["rev"]}:cancel','ban'))
+ rows.append(bottom)
+ return text,kb(rows)
+def user_name(uid):
+ with db() as c:
+  r=c.execute('SELECT name FROM users WHERE id=?',(uid,)).fetchone()
+ return r['name'] if r else ('ID '+str(uid))
+def create_gold(uid,bet,chat,msg):
+ with db() as c:
+  c.execute('BEGIN IMMEDIATE'); allowed(c,uid)
+  old=c.execute('SELECT * FROM gold_v1 WHERE chat=? AND msg=?',(chat,msg)).fetchone()
+  if old: return dict(old)
+  active=c.execute("SELECT * FROM gold_v1 WHERE uid=? AND state='active'",(uid,)).fetchone()
+  if active: return dict(active)
+  seed=secrets.token_hex(32); traps=[hmac.new(bytes.fromhex(seed),f'gold:{i}'.encode(),hashlib.sha256).digest()[0]%2 for i in range(12)]
+  change(c,uid,-bet)
+  gid=c.execute('INSERT INTO gold_v1(uid,bet,traps,seed,hash,chat,msg,created) VALUES(?,?,?,?,?,?,?,?)',(uid,bet,json.dumps(traps),seed,hashlib.sha256(bytes.fromhex(seed)).hexdigest(),chat,msg,int(time.time()))).lastrowid
+  return dict(c.execute('SELECT * FROM gold_v1 WHERE id=?',(gid,)).fetchone())
+@dp.message(F.text.regexp(r'(?i)^\s*золото(?:\s+.*)?$'))
+async def gold_command(m:Message):
+ uid=m.from_user.id; p=m.text.split()
+ if len(p)>2 or (len(p)==2 and not re.fullmatch(r'\d{1,10}',p[1])): await out(m,GAME_RULES['gold']); return
+ with db() as c: active=c.execute("SELECT * FROM gold_v1 WHERE uid=? AND state='active'",(uid,)).fetchone()
+ if active: text,keys=gold_view(dict(active)); await out(m,text,keys); return
+ other,notice=active_game_notice(uid)
+ if other: await out(m,other,notice); return
+ if len(p)!=2: await out(m,GAME_RULES['gold']); return
+ bet=int(p[1])
+ if not 10<=bet<=MAX_BET: await out(m,error_text('Ставки от 10 бубликов' if bet<10 else 'Максимальная ставка: '+fmt(MAX_BET))); return
+ try:
+  with db() as c: once(c,m)
+  g=create_gold(uid,bet,m.chat.id,m.message_id); text,keys=gold_view(g); await out(m,text,keys)
+ except ValueError as e: await out(m,error_text(e))
+@dp.callback_query(F.data.startswith('gl:'))
+async def gold_callback(q:CallbackQuery):
+ if not isinstance(q.message,Message): await q.answer(); return
+ try:
+  _,raw,revision,action=q.data.split(':'); gid=int(raw); rev=int(revision)
+  with db() as c:
+   c.execute('BEGIN IMMEDIATE'); allowed(c,q.from_user.id)
+   row=c.execute('SELECT * FROM gold_v1 WHERE id=?',(gid,)).fetchone()
+   if not row or row['uid']!=q.from_user.id: raise ValueError('Это не твоя игра.')
+   g=dict(row)
+   if action=='honest':
+    text='<b>'+link(g['uid'],user_name(g['uid']))+'\n'+em('money','💰')+' Золото Запада · Честность</b>\n<code>····················</code>\n<b>'+em('key','🔑')+' SHA-256 Хэш:</b> <code>'+g['hash']+'</code>\n<b>'+em('key','🔑')+' Результат:</b> '+('игра не завершилась' if g['state']=='active' else ('победа' if g['state']=='paid' else 'проигрыш'))
+    if g['state']!='active': text+='\n<b>Seed:</b> <code>'+g['seed']+'</code>'
+    await q.answer(); await out(q.message,text,kb([[b('Назад к игре',f'gl:{gid}:{g["rev"]}:back','repeat')]]),True); return
+   if action=='done': await q.answer(); return
+   if action=='back':
+    await q.answer(); text,keys=gold_view(g); await out(q.message,text,keys,True); return
+   if g['state']!='active': raise ValueError('Игра уже завершена.')
+   if g['rev']!=rev: raise ValueError('Нажми кнопку в актуальной игре.')
+   if action=='cancel':
+    change(c,g['uid'],g['bet']); c.execute("UPDATE gold_v1 SET state='cancelled',rev=rev+1 WHERE id=?",(gid,)); await q.answer(); await q.message.edit_reply_markup(reply_markup=None); return
+   if action=='cash':
+    if not g['step']: raise ValueError('Сначала пройди хотя бы один шаг.')
+    payout=gold_payout(g); change(c,g['uid'],payout); c.execute("UPDATE gold_v1 SET state='paid',payout=?,rev=rev+1 WHERE id=?",(payout,gid))
+   elif action in ('0','1'):
+    side=int(action); traps=json.loads(g['traps']); path=json.loads(g['path']); path.append(side)
+    if traps[g['step']]==side:
+     c.execute("UPDATE gold_v1 SET path=?,state='lost',rev=rev+1 WHERE id=?",(json.dumps(path),gid)); add_rake(c,g['uid'],g['bet'])
+    else:
+     step=g['step']+1; state='paid' if step==12 else 'active'; payout=gold_payout(g,step) if state=='paid' else 0
+     if state=='paid': change(c,g['uid'],payout)
+     c.execute('UPDATE gold_v1 SET path=?,step=?,state=?,payout=?,rev=rev+1 WHERE id=?',(json.dumps(path),step,state,payout,gid))
+   elif action=='back': pass
+   else: raise ValueError('Неизвестное действие.')
+   g=dict(c.execute('SELECT * FROM gold_v1 WHERE id=?',(gid,)).fetchone())
+  await q.answer(); text,keys=gold_view(g); await out(q.message,text,keys,True)
+ except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
+
+# Tower: eight floors, five cells per floor, one to four mines.
+def tower_base(count): return float((Decimal('0.97')*Decimal(5)/Decimal(5-count)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP))
+def tower_mult(count,floor): return float((Decimal(str(tower_base(count)))**floor).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP))
+def tower_mult_text(count,floor): return '1.0' if floor==0 else format(Decimal(str(tower_mult(count,floor))),'f').rstrip('0').rstrip('.')
+def tower_payout(g,floor=None):
+ floor=g['floor'] if floor is None else floor
+ return min(MAX_PAY,int(Decimal(g['bet'])*Decimal(str(tower_mult(g['mine_count'],floor)))))
+def tower_board(g):
+ masks=json.loads(g['mine_masks']); path=json.loads(g['path']); lines=[]
+ for floor in range(8):
+  if floor<len(path) or g['state'] in ('lost','paid'):
+   mask=masks[floor]
+   cells=[]
+   for cell in range(5):
+    if mask&(1<<cell): icon=em('mine','💣')
+    elif floor<len(path) and path[floor]==cell: icon=em('money','💰')
+    else: icon=em('diamond','💎')
+    if g['state']=='lost' and g['hit_floor']==floor and g['hit_cell']==cell: icon=em('explode','💥')
+    cells.append(icon)
+   lines.append(' '.join(cells))
+  elif floor==g['floor'] and g['state']=='active': lines.append(' '.join([em('question','❓')]*5))
+  else: lines.append(' '.join([em('question','❓')]*5))
+ return '\n'.join(lines)
+def tower_view(g):
+ count=g['mine_count']; floor=g['floor']; mult=tower_mult(count,floor); payout=tower_payout(g)
+ if g['state']=='lost':
+  text='<b>'+em('tower','🏯')+' Башня · Проигрыш</b>\n\n<b>'+em('ban','🚫')+' Увы, вы подорвались…</b>\n\n<blockquote><b>'+em('gear','⚙️')+' Проиграно: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('paper','📄')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов</b></blockquote>\n'+tower_board(g)
+  return text,kb([[b('Игра окончена','tw:'+str(g['id'])+':'+str(g['rev'])+':done','ok')]])
+ if g['state']=='paid':
+  text='<b>'+em('ok','✔️')+' Забран приз • Башня</b>\n\n<blockquote><b>'+em('paper','📄')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('chart','📈')+' Выиграно: </b><code>'+fmt(g['payout'])+'</code><b> бубликов</b></blockquote>\n'+tower_board(g)
+  return text,None
+ text='<b>'+em('tower','🏯')+' Башня | Game On</b>\n\n<blockquote><b>👻 Кол-во мин: '+em('mine','💣')+'</b><code>'+str(count)+'</code><b>\n'+em('paper','🗒')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n🎲 Можно забрать: </b><code>'+fmt(payout)+'</code><b> бубликов\n'+em('chart','📊')+' Коэффициент: </b><code>x'+tower_mult_text(count,floor)+'</code><b>\n'+em('shop','🏪')+' Этаж: </b><code>'+str(floor)+'/8</code></blockquote>\n'+tower_board(g)
+ rows=[]
+ for cell in range(5): rows.append(b(INVISIBLE,f'tw:{g["id"]}:{g["rev"]}:{cell}','question'))
+ keys=[rows]
+ if floor: keys.append([b('Забрать выигрыш',f'tw:{g["id"]}:{g["rev"]}:cash','crown','primary')])
+ return text,kb(keys)
+def create_tower(uid,bet,count,chat,msg):
+ with db() as c:
+  c.execute('BEGIN IMMEDIATE'); allowed(c,uid)
+  old=c.execute('SELECT * FROM tower_v1 WHERE chat=? AND msg=?',(chat,msg)).fetchone()
+  if old: return dict(old)
+  active=c.execute("SELECT * FROM tower_v1 WHERE uid=? AND state='active'",(uid,)).fetchone()
+  if active: return dict(active)
+  masks=[]
+  for _ in range(8): masks.append(sum(1<<i for i in secrets.SystemRandom().sample(range(5),count)))
+  change(c,uid,-bet)
+  gid=c.execute('INSERT INTO tower_v1(uid,bet,mine_count,mine_masks,chat,msg,created) VALUES(?,?,?,?,?,?,?)',(uid,bet,count,json.dumps(masks),chat,msg,int(time.time()))).lastrowid
+  return dict(c.execute('SELECT * FROM tower_v1 WHERE id=?',(gid,)).fetchone())
+@dp.message(F.text.regexp(r'(?i)^\s*башня(?:\s+.*)?$'))
+async def tower_command(m:Message):
+ uid=m.from_user.id; p=m.text.split()
+ if len(p)>3 or (len(p)==3 and (not re.fullmatch(r'\d{1,10}',p[1]) or not re.fullmatch(r'[1-4]',p[2]))) or (len(p)==2 and not re.fullmatch(r'\d{1,10}',p[1])): await out(m,GAME_RULES['tower']); return
+ with db() as c: active=c.execute("SELECT * FROM tower_v1 WHERE uid=? AND state='active'",(uid,)).fetchone()
+ if active: text,keys=tower_view(dict(active)); await out(m,text,keys); return
+ other,notice=active_game_notice(uid)
+ if other: await out(m,other,notice); return
+ if len(p)!=3: await out(m,GAME_RULES['tower']); return
+ bet=int(p[1]); count=int(p[2])
+ if not 10<=bet<=MAX_BET: await out(m,error_text('Ставки от 10 бубликов' if bet<10 else 'Максимальная ставка: '+fmt(MAX_BET))); return
+ try:
+  with db() as c: once(c,m)
+  g=create_tower(uid,bet,count,m.chat.id,m.message_id); text,keys=tower_view(g); await out(m,text,keys)
+ except ValueError as e: await out(m,error_text(e))
+@dp.callback_query(F.data.startswith('tw:'))
+async def tower_callback(q:CallbackQuery):
+ if not isinstance(q.message,Message): await q.answer(); return
+ try:
+  _,raw,revision,action=q.data.split(':'); gid=int(raw); rev=int(revision)
+  with db() as c:
+   c.execute('BEGIN IMMEDIATE'); allowed(c,q.from_user.id)
+   row=c.execute('SELECT * FROM tower_v1 WHERE id=?',(gid,)).fetchone()
+   if not row or row['uid']!=q.from_user.id: raise ValueError('Это не твоя игра.')
+   g=dict(row)
+   if action=='done': await q.answer(); return
+   if g['state']!='active': raise ValueError('Игра уже завершена.')
+   if g['rev']!=rev: raise ValueError('Нажми кнопку в актуальной игре.')
+   if action=='cash':
+    if not g['floor']: raise ValueError('Сначала пройди хотя бы один этаж.')
+    payout=tower_payout(g); change(c,g['uid'],payout); c.execute("UPDATE tower_v1 SET state='paid',payout=?,rev=rev+1 WHERE id=?",(payout,gid))
+   else:
+    if not re.fullmatch(r'[0-4]',action): raise ValueError('Неизвестная клетка.')
+    cell=int(action); masks=json.loads(g['mine_masks']); path=json.loads(g['path']); floor=g['floor']
+    if masks[floor]&(1<<cell):
+     c.execute("UPDATE tower_v1 SET state='lost',hit_floor=?,hit_cell=?,rev=rev+1 WHERE id=?",(floor,cell,gid)); add_rake(c,g['uid'],g['bet'])
+    else:
+     path.append(cell); next_floor=floor+1; state='paid' if next_floor==8 else 'active'; payout=tower_payout(g,next_floor) if state=='paid' else 0
+     if state=='paid': change(c,g['uid'],payout)
+     c.execute('UPDATE tower_v1 SET path=?,floor=?,state=?,payout=?,rev=rev+1 WHERE id=?',(json.dumps(path),next_floor,state,payout,gid))
+   g=dict(c.execute('SELECT * FROM tower_v1 WHERE id=?',(gid,)).fetchone())
+  await q.answer(); text,keys=tower_view(g); await out(q.message,text,keys,True)
+ except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
+
+@dp.callback_query(F.data.startswith('resume:'))
+async def resume_game(q:CallbackQuery):
+ if not isinstance(q.message,Message): await q.answer(); return
+ try:
+  _,kind,raw=q.data.split(':'); gid=int(raw)
+  with db() as c:
+   table={'hilo':'app_hilo_v6','mines':'mines_v1','gold':'gold_v1','tower':'tower_v1'}.get(kind)
+   if not table: raise ValueError('Неизвестная игра.')
+   row=c.execute(f'SELECT * FROM {table} WHERE id=? AND uid=? AND state=\'active\'',(gid,q.from_user.id)).fetchone()
+  if not row: raise ValueError('Активная игра не найдена.')
+  g=dict(row); text,keys={'hilo':gameview,'mines':mineview,'gold':gold_view,'tower':tower_view}[kind](g)
+  await q.answer(); await out(q.message,text,keys,True)
+ except (ValueError,TypeError) as e: await q.answer(str(e),show_alert=True)
+
 # Roulette.
 RED={1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
 def color(n): return em('green','🟢') if n==0 else em('red','🔴') if n in RED else '⚫️'
@@ -624,7 +881,6 @@ def round_open(c,chat,thread):
 
 def place_partial(c,r,uid,name,bets):
  allowed(c,uid); funds=balance(c,uid); accepted=[]; report=[]
- if sum(amount for amount,kind,k in bets if 10<=amount<=MAX_BET)>funds: return [(0,'',False,'Недостаточно средств')],0
  for amount,kind,k in bets:
   if not 10<=amount<=MAX_BET: report.append((amount,kind,False,'Ставки от 10 до '+fmt(MAX_BET)+' бубликов')); continue
   if funds<amount: report.append((amount,kind,False,'Недостаточно средств')); continue
@@ -655,20 +911,20 @@ def render_report_rows(rows):
  if in_quote: text+='</b></blockquote>'
  return text
 async def report_bets(m,report):
- accepted=[]; rejected=[]
+ accepted=[]; other_errors=[]; insufficient=False
  for amount,kind,ok,why in report:
-  if ok: accepted.append((True,em('face','😀')+fmt(amount)+' на '+label(kind)))
-  elif why=='Недостаточно средств': rejected.append((False,em('error','❗')+' Недостаточно средств.'))
-  else: rejected.append((False,em('error','❗')+' '+esc(why)+'.'))
- if rejected and any('Недостаточно средств' in line for _,line in rejected):
-  await out(m,'<b>'+em('error','❗')+' Недостаточно средств.</b>'); return
- current=[]
- for row in accepted+rejected:
-  trial=current+[row]
-  if current and visible_len(render_report_rows(trial))>4096:
-   await out(m,render_report_rows(current)); current=[row]
-  else: current=trial
- if current: await out(m,render_report_rows(current))
+  if ok: accepted.append(em('face','😀')+'<code>'+fmt(amount)+'</code> на '+label(kind))
+  elif why=='Недостаточно средств': insufficient=True
+  else: other_errors.append(esc(why)+'.')
+ parts=[]
+ if accepted:
+  parts.append('<b>'+em('fire','🔥')+' Ставки приняты:</b>\n\n<blockquote><b>'+'\n'.join(accepted)+'</b></blockquote>')
+ if insufficient:
+  parts.append('<b>'+em('error','❗')+' Недостаточно баланса.</b>')
+ for error in other_errors: parts.append('<b>'+em('error','❗')+' '+error+'</b>')
+ if not parts: return
+ text='\n\n'.join(parts)
+ await out(m,text)
 
 def bet_filter(m):
  p=(m.text or '').split()
@@ -714,7 +970,7 @@ async def roulette(m:Message):
  try:
   if cmd=='лог':
    with db() as c: rows=c.execute("SELECT * FROM (SELECT * FROM r_round9 WHERE chat=? AND thread=? AND state='done' ORDER BY id DESC LIMIT 10) ORDER BY id ASC",(m.chat.id,thread)).fetchall()
-   await out(m,'<b>'+em('crown','👑')+' Лог рулетки\n'+('\n'.join(str(i+1)+'. '+color(r['number'])+' '+str(r['number']) for i,r in enumerate(rows)) or 'Пока пусто.')+'</b>'); return
+   await out(m,'<b>'+em('crown','👑')+' Лог рулетки\n'+('\n\n'.join('<b>'+str(i+1)+'.</b> '+color(r['number'])+' <code>'+str(r['number'])+'</code>' for i,r in enumerate(rows)) or 'Пока пусто.')+'</b>'); return
   if cmd=='ставки':
    with db() as c: r=c.execute("SELECT id FROM r_round9 WHERE chat=? AND thread=? AND state='open'",(m.chat.id,thread)).fetchone()
    if not r: await out(m,'<b>Ставок нет.</b>'); return
