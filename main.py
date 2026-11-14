@@ -90,7 +90,7 @@ async def out(m,text,keys=None,edit=False):
    if 'message is not modified' in str(retry).lower(): return
    raise
 async def notify(text,keys=None):
- for uid in ADMINS:
+ for uid in admin_ids():
   try: await bot.send_message(uid,text,reply_markup=keys)
   except TelegramBadRequest:
    try: await bot.send_message(uid,re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>',r'\1',text),reply_markup=plain_markup(keys))
@@ -121,11 +121,20 @@ def init():
   CREATE TABLE IF NOT EXISTS mines_v1(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER NOT NULL,bet INTEGER NOT NULL,mine_count INTEGER NOT NULL CHECK(mine_count BETWEEN 1 AND 24),mine_mask INTEGER NOT NULL,opened_mask INTEGER NOT NULL DEFAULT 0,hit INTEGER,state TEXT NOT NULL DEFAULT 'active',rev INTEGER NOT NULL DEFAULT 0,cents INTEGER NOT NULL DEFAULT 100,payout INTEGER NOT NULL DEFAULT 0,chat INTEGER NOT NULL,msg INTEGER NOT NULL,created INTEGER NOT NULL,UNIQUE(chat,msg));
   CREATE UNIQUE INDEX IF NOT EXISTS mines_active_v1 ON mines_v1(uid) WHERE state='active';
   CREATE TABLE IF NOT EXISTS daily_bonus_v1(uid INTEGER PRIMARY KEY,last_claim INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS rake_v1(uid INTEGER PRIMARY KEY,amount INTEGER NOT NULL DEFAULT 0 CHECK(amount>=0));
+  CREATE TABLE IF NOT EXISTS bot_admins_v1(uid INTEGER PRIMARY KEY,added_by INTEGER NOT NULL DEFAULT 0,added_at INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS bot_admin_revoked_v1(uid INTEGER PRIMARY KEY);
   CREATE INDEX IF NOT EXISTS balance_top_v1 ON balances(amount DESC,uid);
   ''')
+  for admin_id in ADMINS:
+   c.execute('INSERT OR IGNORE INTO bot_admins_v1(uid,added_by,added_at) VALUES(?,?,?)',(admin_id,admin_id,int(time.time())))
   for r in c.execute("SELECT id,mult FROM app_hilo_v6 WHERE state='active'").fetchall():
    c.execute('UPDATE app_hilo_v6 SET mult=? WHERE id=?',(num(r['mult']),r['id']))
 
+def admin_ids():
+ with db() as c: return {r['uid'] for r in c.execute('SELECT uid FROM bot_admins_v1 WHERE uid NOT IN (SELECT uid FROM bot_admin_revoked_v1)')}
+def is_admin(uid):
+ with db() as c: return c.execute('SELECT 1 FROM bot_admins_v1 WHERE uid=? AND uid NOT IN (SELECT uid FROM bot_admin_revoked_v1)',(uid,)).fetchone() is not None
 def touch(uid,name):
  with db() as c:
   c.execute('INSERT INTO users(id,name) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name',(uid,name[:256]))
@@ -167,7 +176,7 @@ class VerificationMiddleware(BaseMiddleware):
   if isinstance(event,Message) and event.text:
    p=event.text.split(maxsplit=1); cmd=p[0].split('@')[0].lower() if p else ''
   appeal_exception=private and s=='failed' and cmd in ('/appeal','/оспорить')
-  admin_exception=private and user.id in ADMINS and (cmd in ('/panel','/панель','/ban','/unban','/recheck','/cancel') or isinstance(event,Message) and user.id in waiting or isinstance(event,CallbackQuery) and (event.data or '').startswith('adm:'))
+  admin_exception=private and is_admin(user.id) and (cmd in ('/panel','/панель','/ban','/unban','/recheck','/cancel','+админ','-админ') or isinstance(event,Message) and user.id in waiting or isinstance(event,CallbackQuery) and (event.data or '').startswith('adm:'))
   if s=='passed' or appeal_exception or admin_exception: return await handler(event,data)
   message=event if isinstance(event,Message) else event.message
   if isinstance(event,CallbackQuery): await event.answer('Сначала пройдите проверку!' if s=='pending' else 'Вы забанены',show_alert=True)
@@ -195,9 +204,46 @@ async def navigation(q:CallbackQuery):
   text='<b>• Топ прошедших проверку</b>\n\n<blockquote><b>'+('\n'.join(em('5879770735999717115','🏆')+' '+link(r['id'],r['name'][:60])+' — проверка пройдена' for r in rows) or 'Пока никого нет.')+'</b></blockquote>'
  await out(q.message,text,kb([[b('Назад','home','5875082500023258804')]]),True)
 
+
+# Rake bonus: 5% of finally lost wagers.
+RAKE_RATE=Decimal('0.05')
+def add_rake(c,uid,lost_amount):
+ amount=int(Decimal(max(0,lost_amount))*RAKE_RATE)
+ if amount:
+  c.execute('INSERT INTO rake_v1(uid,amount) VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET amount=amount+excluded.amount',(uid,amount))
+ return amount
+def rake_view(uid):
+ with db() as c:
+  row=c.execute('SELECT amount FROM rake_v1 WHERE uid=?',(uid,)).fetchone()
+ amount=row['amount'] if row else 0
+ text='<b>'+em('bonus','🎁')+' Рейк-бонус\n\n'+em('money','🥯')+' Доступно: '+fmt(amount)+' бубликов\n'+em('face','🥃')+' Вы получаете 5% с окончательно проигранных бубликов</b>'
+ key=b('Забрать' if amount else 'Нет','rake:claim' if amount else 'rake:none','bonusgift' if amount else 'none')
+ return text,kb([[key]])
+@dp.message(F.text.regexp(r'(?i)^\s*рейк\s*$'))
+async def rake_command(m:Message):
+ text,keys=rake_view(m.from_user.id); await out(m,text,keys)
+@dp.callback_query(F.data.startswith('rake:'))
+async def rake_callback(q:CallbackQuery):
+ if not isinstance(q.message,Message): await q.answer(); return
+ if q.data=='rake:none':
+  await q.answer('Пока нет доступного рейк-бонуса.',show_alert=True); return
+ try:
+  with db() as c:
+   c.execute('BEGIN IMMEDIATE')
+   row=c.execute('SELECT amount FROM rake_v1 WHERE uid=?',(q.from_user.id,)).fetchone()
+   amount=row['amount'] if row else 0
+   if amount<=0:
+    await q.answer('Нет доступного рейк-бонуса.',show_alert=True); return
+   change(c,q.from_user.id,amount)
+   c.execute('UPDATE rake_v1 SET amount=0 WHERE uid=?',(q.from_user.id,))
+   c.execute('INSERT INTO app_audit_v6(actor,uid,ts,action) VALUES(?,?,?,?)',(q.from_user.id,q.from_user.id,int(time.time()),f'rake_claim +{amount}'))
+  await q.answer('Вы забрали '+fmt(amount)+' бубликов.',show_alert=True)
+  text,keys=rake_view(q.from_user.id); await out(q.message,text,keys,True)
+ except ValueError as e: await q.answer(str(e),show_alert=True)
+
 # Help: requested compact layout, without admin commands.
 def help_text(uid=None):
- return '<b>'+em('clip','📎')+' Помощь</b>\n\n<blockquote>'+em('check','⚙')+' <code>/start</code><b> — запустить бота/главное меню</b>\n'+em('chat','💬')+' <code>б</code><b> — отобразить баланс</b>\n'+em('notice','❗️')+' <code>помощь</code><b> / </b><code>игры</code><b> — навигация</b>\n'+em('pin','📌')+' <code>/appeal</code><b> — апелляция на бан в боте</b>\n'+em('bonusgift','🎁')+' <code>бонус</code><b> — получить доп. валюту</b>\n'+em('map','🗺')+' <code>топ б</code><b> — топеры в боте по балансу</b></blockquote>'
+ return '<b>'+em('clip','📎')+' Помощь</b>\n\n<blockquote>'+em('check','⚙')+' <code>/start</code><b> — запустить бота/главное меню</b>\n'+em('chat','💬')+' <code>б</code><b> — отобразить баланс</b>\n'+em('notice','❗️')+' <code>помощь</code><b> / </b><code>игры</code><b> — навигация</b>\n'+em('pin','📌')+' <code>/appeal</code><b> — апелляция на бан в боте</b>\n'+em('bonusgift','🎁')+' <code>бонус</code><b> — получить доп. валюту</b>\n'+em('bonus','🎁')+' <code>рейк</code><b> — рейк-бонус</b>\n'+em('map','🗺')+' <code>топ б</code><b> — топеры в боте по балансу</b></blockquote>'
 def games_keyboard(): return kb([[b('Хило','games:hilo','5447327564345416222')],[b('Мины','games:mines','mine_start')],[b('Рулетка','games:roulette','wheel')],[b('Главное меню','home','5875082500023258804')]])
 GAME_RULES={
 'hilo':'<b>'+em('5447327564345416222','🎴')+' Хило | Help game</b>\n\n<b>'+em('clip','📎')+' Команда: </b><code>хило [ставка]</code>\n\n<b>'+em('search','🔍')+' Главная задача в карточной игре HiLo — угадать следующую карту: будет она выше текущей или ниже?\nЕсли вы угадаете, вы можете забрать выигрыш или продолжить.</b>',
@@ -259,15 +305,15 @@ async def top_balance(m:Message):
  await out(m,text)
 
 # Admin panel. Recovery moderation and appeals remain available when blocked.
-def admin(m): return valid_user(m) and m.chat.type=='private' and m.from_user.id in ADMINS
+def admin(m): return valid_user(m) and m.chat.type=='private' and is_admin(m.from_user.id)
 async def admin_callback(q):
- ok=q.from_user.id in ADMINS and isinstance(q.message,Message) and q.message.chat.type=='private'
+ ok=is_admin(q.from_user.id) and isinstance(q.message,Message) and q.message.chat.type=='private'
  await q.answer(None if ok else 'Нет доступа'); return ok
 @dp.message(Command('panel','панель'))
 async def panel(m:Message):
  if not admin(m): return
  waiting.pop(m.from_user.id,None)
- await out(m,'<b>Панель администратора</b>\n<blockquote><code>/give ID сумма</code><b> — выдать</b>\n<code>/take ID сумма</code><b> — списать</b>\n<code>/ban ID причина</code>\n<code>/unban ID</code>\n<code>/recheck ID</code></blockquote>',kb([[b('Логи','adm:logs:0')],[b('Апелляции','adm:appeals:0')],[b('Бан','adm:input:ban'),b('Разбан','adm:input:unban')],[b('Повторная проверка','adm:input:recheck')]]))
+ await out(m,'<b>Панель администратора</b>\n<blockquote><code>/give ID сумма</code><b> — выдать</b>\n<code>/take ID сумма</code><b> — списать</b>\n<code>/ban ID причина</code>\n<code>/unban ID</code>\n<code>/recheck ID</code>\n<code>+админ</code> / <code>-админ</code> ответом на сообщение</blockquote>',kb([[b('Логи','adm:logs:0')],[b('Апелляции','adm:appeals:0')],[b('Бан','adm:input:ban'),b('Разбан','adm:input:unban')],[b('Повторная проверка','adm:input:recheck')]]))
 def moderate(actor,uid,action,reason):
  with db() as c:
   c.execute('BEGIN IMMEDIATE')
@@ -352,6 +398,27 @@ async def appeal(m:Message):
  if error: await out(m,error_text(error)); return
  await out(m,'<b>Апелляция сохранена.</b>'); await notify(f'<b>Апелляция ID {uid}\n{esc(body)}</b>',appealkeys(aid))
 
+
+# Dynamic admin management: reply to the target user's message.
+@dp.message(F.text.regexp(r'(?i)^\s*[+-]админ\s*$'))
+async def manage_admin(m:Message):
+ if not valid_user(m) or not is_admin(m.from_user.id): return
+ if not m.reply_to_message or not valid_user(m.reply_to_message):
+  await out(m,'<b>Ответь командой +админ или -админ на сообщение нужного пользователя.</b>'); return
+ target=m.reply_to_message.from_user; uid=target.id
+ if uid==m.from_user.id:
+  await out(m,'<b>Нельзя изменить собственные права этой командой.</b>'); return
+ add=m.text.strip().startswith('+')
+ with db() as c:
+  c.execute('BEGIN IMMEDIATE')
+  if add:
+   c.execute('DELETE FROM bot_admin_revoked_v1 WHERE uid=?',(uid,))
+   c.execute('INSERT OR IGNORE INTO bot_admins_v1(uid,added_by,added_at) VALUES(?,?,?)',(uid,m.from_user.id,int(time.time())))
+  else:
+   c.execute('INSERT OR IGNORE INTO bot_admin_revoked_v1(uid) VALUES(?)',(uid,))
+   c.execute('DELETE FROM bot_admins_v1 WHERE uid=?',(uid,))
+ await out(m,'<b>'+em('crown','👑')+' '+link(uid,target.full_name)+(' стал админом' if add else ' больше не администратор')+'</b>')
+
 # Balance commands.
 @dp.message(F.text.regexp(r'(?i)^\s*б\s*$'))
 async def bal(m:Message):
@@ -359,7 +426,7 @@ async def bal(m:Message):
  await out(m,'<b>'+link(m.from_user.id,m.from_user.full_name)+':\n'+em('money','🥯')+' Баланс: '+fmt(value)+' бубликов</b>')
 @dp.message(Command('give','take'))
 async def give(m:Message):
- if not valid_user(m) or m.from_user.id not in ADMINS: return
+ if not valid_user(m) or not is_admin(m.from_user.id): return
  p=m.text.split(); target=None
  if len(p)==2 and m.reply_to_message and valid_user(m.reply_to_message): target=m.reply_to_message.from_user; uid=target.id; raw=p[1]
  elif len(p)==3 and re.fullmatch(r'[1-9][0-9]{0,14}',p[1]): uid=int(p[1]); raw=p[2]
@@ -383,13 +450,14 @@ HELP='<b>'+em('5886436057091673541','🎴')+' Хило [ N ]\n'+em('589784661696
 def gameview(g):
  if g['state']=='paid': return '<b>'+em('ok','✅')+' Успешно</b>\n\n<blockquote><b>'+em('money','🥯')+' '+fmt(g['payout'])+' бубликов</b></blockquote>',None
  if g['state']!='active': return '<b>'+em('5283283384418707920','❌')+' Неправильно! Выпало: '+card(g['card'])+'</b>',None
- text='<b>'+em('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote><b>'+em('5389099885259666198','🃏')+' Карта: '+card(g['card'])+'\n'+em('5447160283959173987','✖️')+' Множитель: x'+num(g['mult'])+'</b></blockquote>'
+ available=min(MAX_PAY,int(Decimal(g['bet'])*two(g['mult'])))
+ text='<b>'+em('5447327564345416222','🎴')+' Хило (карточная игра)</b>\n\n<blockquote><b>'+em('5389099885259666198','🃏')+' Карта: '+card(g['card'])+'\n'+em('5447160283959173987','✖️')+' Множитель: x'+num(g['mult'])+'\n'+em('money','🥯')+' Можно забрать: '+fmt(available)+' бубликов</b></blockquote>'
  row=[]
  for d,label,icon,style in [('low','Ниже','5447490850412074781','danger'),('high','Выше','5449683594425410231','success')]:
   k=rate(g['card'],d)
   if k: row.append(b(label+' x'+num(k),f'hl:{g["id"]}:{g["rev"]}:{d}',icon,style))
  rows=[row]
- if g['wins']: rows.append([b('Забрать выигрыш x'+num(g['mult']),f'hl:{g["id"]}:{g["rev"]}:cash','5447184078077992135','primary')])
+ if g['wins']: rows.append([b('Забрать '+fmt(min(MAX_PAY,int(Decimal(g['bet'])*two(g['mult'])))),f'hl:{g["id"]}:{g["rev"]}:cash','5447184078077992135','success')])
  return text,kb(rows)
 @dp.message(F.text.regexp(r'(?i)^\s*(хл|хило)(?:\s.*)?$'))
 async def hilo(m:Message):
@@ -426,11 +494,12 @@ async def hilo_step(q:CallbackQuery):
     elif action in ('low','high'):
      k=rate(g['card'],action)
      if k is None: raise ValueError('Невозможный ход.')
-     n=secrets.randbelow(13)+1; win=n<g['card'] if action=='low' else n>g['card']
+     n=secrets.choice([value for value in range(1,14) if value!=g['card']]); win=n<g['card'] if action=='low' else n>g['card']
      if win:
       mult=two(min(two(g['mult'])*k,Decimal(MAX_PAY)/g['bet']))
       c.execute('UPDATE app_hilo_v6 SET card=?,mult=?,wins=wins+1,rev=rev+1 WHERE id=?',(n,num(mult),gid))
-     else: c.execute("UPDATE app_hilo_v6 SET card=?,state='lost',rev=rev+1 WHERE id=?",(n,gid))
+     else:
+       c.execute("UPDATE app_hilo_v6 SET card=?,state='lost',rev=rev+1 WHERE id=?",(n,gid)); add_rake(c,g['uid'],g['bet'])
     else: raise ValueError('Неизвестное действие.')
    g=c.execute('SELECT * FROM app_hilo_v6 WHERE id=?',(gid,)).fetchone()
   await q.answer(); text,keys=gameview(g)
@@ -509,7 +578,8 @@ def mine_move(uid,gid,revision,action):
    if not re.fullmatch(r'\d{1,2}',action) or not 0<=int(action)<25: raise ValueError('Неизвестная клетка.')
    cell=int(action); bit=1<<cell
    if g['opened_mask']&bit: return g,None
-   if g['mine_mask']&bit: c.execute("UPDATE mines_v1 SET state='lost',hit=?,rev=rev+1 WHERE id=?",(cell,gid))
+   if g['mine_mask']&bit:
+     c.execute("UPDATE mines_v1 SET state='lost',hit=?,rev=rev+1 WHERE id=?",(cell,gid)); add_rake(c,uid,g['bet'])
    else:
     opened_mask=g['opened_mask']|bit; opened=opened_mask.bit_count(); cents=mines_cents(g['mine_count'],opened,g['bet']); final=opened==25-g['mine_count']; payout=min(MAX_PAY,g['bet']*cents//100) if final else 0
     if final: change(c,uid,payout)
@@ -554,6 +624,7 @@ def round_open(c,chat,thread):
 
 def place_partial(c,r,uid,name,bets):
  allowed(c,uid); funds=balance(c,uid); accepted=[]; report=[]
+ if sum(amount for amount,kind,k in bets if 10<=amount<=MAX_BET)>funds: return [(0,'',False,'Недостаточно средств')],0
  for amount,kind,k in bets:
   if not 10<=amount<=MAX_BET: report.append((amount,kind,False,'Ставки от 10 до '+fmt(MAX_BET)+' бубликов')); continue
   if funds<amount: report.append((amount,kind,False,'Недостаточно средств')); continue
@@ -587,7 +658,10 @@ async def report_bets(m,report):
  accepted=[]; rejected=[]
  for amount,kind,ok,why in report:
   if ok: accepted.append((True,em('face','😀')+fmt(amount)+' на '+label(kind)))
-  else: rejected.append((False,em('error','❗')+' '+fmt(amount)+' на '+label(kind)+' — '+esc(why)))
+  elif why=='Недостаточно средств': rejected.append((False,em('error','❗')+' Недостаточно средств.'))
+  else: rejected.append((False,em('error','❗')+' '+esc(why)+'.'))
+ if rejected and any('Недостаточно средств' in line for _,line in rejected):
+  await out(m,'<b>'+em('error','❗')+' Недостаточно средств.</b>'); return
  current=[]
  for row in accepted+rejected:
   trial=current+[row]
@@ -639,8 +713,8 @@ async def roulette(m:Message):
  uid=m.from_user.id; cmd=m.text.strip().lower(); thread=m.message_thread_id or 0
  try:
   if cmd=='лог':
-   with db() as c: rows=c.execute("SELECT * FROM r_round9 WHERE chat=? AND thread=? AND state='done' ORDER BY id DESC LIMIT 10",(m.chat.id,thread)).fetchall()
-   await out(m,'<b>'+em('crown','👑')+' Лог рулетки\n'+(' '.join(color(r['number'])+' '+str(r['number']) for r in rows) or 'Пока пусто.')+'</b>'); return
+   with db() as c: rows=c.execute("SELECT * FROM (SELECT * FROM r_round9 WHERE chat=? AND thread=? AND state='done' ORDER BY id DESC LIMIT 10) ORDER BY id ASC",(m.chat.id,thread)).fetchall()
+   await out(m,'<b>'+em('crown','👑')+' Лог рулетки\n'+('\n'.join(str(i+1)+'. '+color(r['number'])+' '+str(r['number']) for i,r in enumerate(rows)) or 'Пока пусто.')+'</b>'); return
   if cmd=='ставки':
    with db() as c: r=c.execute("SELECT id FROM r_round9 WHERE chat=? AND thread=? AND state='open'",(m.chat.id,thread)).fetchone()
    if not r: await out(m,'<b>Ставок нет.</b>'); return
@@ -663,11 +737,15 @@ async def roulette(m:Message):
      totals[x['uid']]=totals.get(x['uid'],0)+payout; results.append((x['id'],payout))
     for who,payout in totals.items(): change(c,who,payout)
     for bid,payout in results: c.execute("UPDATE r_bet9 SET state='settled',payout=? WHERE id=?",(payout,bid))
+    losses={}
+    for x in rows:
+     if not wins(x['kind'],n): losses[x['uid']]=losses.get(x['uid'],0)+x['amount']
+    for who,lost_amount in losses.items(): add_rake(c,who,lost_amount)
     c.execute("UPDATE r_round9 SET state='done',number=?,ts=? WHERE id=?",(n,int(time.time()),r['id']))
   if cmd=='отмена': await out(m,text)
   else: text,keys=result_view(r['id'],0,m.chat.id,thread); await out(m,text,keys)
  except ValueError as e:
-  text=str(e); await out(m,'<b>'+em('clock','⏲')+' '+esc(text)+'</b>' if text.startswith('Подождите') else error_text(text))
+  text=str(e); await out(m,'<b>'+em('clock','⏲')+' '+esc(text)+'</b>' if text.startswith('Подождите') else ('<b>'+em('error','❗')+' Недостаточно средств.</b>' if text=='Недостаточно средств' else error_text(text)))
 def own_bets(rid,uid,page,chat,thread):
  with db() as c:
   r=c.execute("SELECT id FROM r_round9 WHERE id=? AND chat=? AND thread=? AND state='open'",(rid,chat,thread)).fetchone()
