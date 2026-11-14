@@ -45,7 +45,13 @@ def db():
  finally: c.close()
 
 E={'ok':'5206607081334906820','ban':'5240241223632954241','red':'5388647401865097828','green':'5388907487904674520','fire':'6008104758236156926','face':'5994473545650934240','clock':'5386367538735104399','crown':'5807868868886009920','repeat':'5877410604225924969','double':'6026261955818294779','money':'5238132025323444613','error':'5447270999626131126','limit':'5449395513789031846','none':'5192966772008966700','mine_start':'5469654973308476699','mine':'5375445874988036618','flag':'5447160283959173987','bulb':'5447175024286934438','camera':'5884290437459480896','chat':'5985630530111020079','question':'5447590953214846419','moon':'5802946896494334636','diamond':'5447415357771916752','chart':'5447233732194903146','gift':'6012618640015234346','box':'5258134813302332906','explode':'5276032951342088188','lose_mine':'5888974760720732797','check':'5877260593903177342','help':'5888584382553265934','clip':'5447376801850500535','search':'5449862149100840463','wheel':'6334498573102613995','down':'5406745015365943482','gear':'5341715473882955310','pin':'5796440171364749940','bonusgift':'5985472565508838112','map':'5883955653348692941','notice':'5775887550262546277','bonus':'5963213811597970978','paper':'5877597667231534929','shop':'5983399041197675256','key':'5330115548900501467','trident':'5388787654022148728','tower':'5388571110361020010','donut':'5211042502651432248','hashtag':'5269493627410731513','bomb_anim':'5303112793157810087','dynamite':'5469913852462242978','top_title':'5317035505173430594','top1':'5235776368905562305','top2':'5237704680372447424','top3':'5238044171767393675','your_place':'5449758837957502787','food':'5217726154663796197','smile':'5447271008216063923','comet':'5224607267797606837','yum':'5390923103171784225','bookmark':'5222444124698853913','sun':'5402477260982731644','cherries':'5388988070081082206','cake':'5265043762119199599','weather':'5399913388845322366','trend':'5449683594425410231','downtrend':'5447183459602669338','candy':'5388647101217387586','person':'5433758796289685818'}
-ICON_FALLBACK={E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥',E['green']:'🟩',E['red']:'🟥'}
+ICON_FALLBACK={
+ E['question']:'❓',E['diamond']:'💎',E['mine']:'💣',E['explode']:'💥',
+ E['green']:'🟩',E['red']:'🟥',E['flag']:'🚩',E['crown']:'👑',
+ E['tower']:'🏯',E['top1']:'🥇',E['top2']:'🥈',E['top3']:'🥉',
+ E['cherries']:'🍒',E['paper']:'📄',E['chart']:'📈',E['ok']:'✔️',
+ E['ban']:'🚫',E['gear']:'⚙️',E['shop']:'🏪',E['money']:'💰'
+}
 INVISIBLE='\u200b'
 def esc(s): return html.escape(str(s))
 def em(key,fallback): return f'<tg-emoji emoji-id="{E.get(key,key)}">{fallback}</tg-emoji>'
@@ -278,8 +284,12 @@ def top_rich_text(uid):
  medals=('top1','top2','top3')
  lines=[]
  for i,r in enumerate(rows):
-  lines.append(em(medals[i],str(i+1))+' '+link(r['id'],r['name'][:55])+' — <b>'+fmt(r['amount'])+'</b> '+em('cherries','🍒'))
- return '<b>'+em('top_title','🏆')+' ТОП БОГАЧЕЙ</b>\n\n<blockquote><b>'+'\n'.join(lines)+'</b></blockquote>\n\n<b>'+em('your_place','📍')+' Ваше место: '+fmt(rank)+' — '+fmt(mine)+'</b>'
+  lines.append(em(medals[i],('🥇','🥈','🥉')[i])+' '+link(r['id'],r['name'][:55])+' — <b>'+fmt(r['amount'])+'</b> '+em('cherries','🍒'))
+ text='<b>'+em('top_title','🏆')+' ТОП БАЛАНСА</b>'
+ if lines:
+  text+='\n\n<blockquote>'+'\n'.join(lines)+'</blockquote>'
+ text+='\n\n<b>'+em('your_place','📍')+' Ваше место: '+fmt(rank)+'\n'+em('cherries','🍒')+' Ваш баланс: '+fmt(mine)+'</b>'
+ return text
 
 # Rake bonus: 5% of finally lost wagers.
 RAKE_RATE=Decimal('0.05')
@@ -868,23 +878,31 @@ def tower_payout(g,floor=None):
 def tower_view(g):
  count=g['mine_count']; floor=g['floor']; payout=tower_payout(g)
  path=json.loads(g['path']); masks=json.loads(g['mine_masks'])
+ header='<b>'+em('tower','🏯')+' БАШНЯ</b>'
+ details=(
+  em('paper','🗒')+' <b>Ставка:</b> <code>'+fmt(g['bet'])+'</code> '+em('cherries','🍒')+
+  '\n'+em('mine','💣')+' <b>Мин:</b> <code>'+str(count)+'</code>'+
+  '\n'+em('shop','🏢')+' <b>Этаж:</b> <code>'+str(floor)+'/8</code>'+
+  '\n'+em('chart','📈')+' <b>Коэффициент:</b> <code>x'+tower_mult_text(count,floor)+'</code>'
+ )
  if g['state']=='lost':
-  text='<b>'+em('tower','🏯')+' Башня · Проигрыш</b>\n\n<b>'+em('ban','🚫')+' Увы, вы подорвались…</b>\n\n<blockquote><b>'+em('gear','⚙️')+' Проиграно: </b><code>'+fmt(g['bet'])+'</code><b> бубликов</b></blockquote>'
+  text=header+' · <b>ПРОИГРЫШ</b>\n\n<blockquote>'+details+'\n'+em('explode','💥')+' <b>Результат:</b> <code>−'+fmt(g['bet'])+'</code> '+em('cherries','🍒')+'\n'+em('ban','🚫')+' <b>Вы попали на мину</b></blockquote>'
   rows=[]
   for f in range(7,-1,-1):
    row=[]
    for cell in range(5):
     if f==g['hit_floor'] and cell==g['hit_cell']: icon='explode'
     elif masks[f]&(1<<cell): icon='mine'
-    elif f<len(path) and path[f]==cell: icon='green'
-    else: icon=None
-    row.append(b(INVISIBLE if icon else '·',f'tw:{g["id"]}:{g["rev"]}:done',icon))
+    elif f<len(path) and path[f]==cell: icon='diamond'
+    else: icon='flag'
+    row.append(b(INVISIBLE,f'tw:{g["id"]}:{g["rev"]}:done',icon))
    rows.append(row)
   return text,kb(rows)
  if g['state']=='paid':
-  text='<b>'+em('ok','✔️')+' Забран приз • Башня</b>\n\n<blockquote><b>'+em('paper','📄')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n'+em('chart','📈')+' Выиграно: </b><code>'+fmt(g['payout'])+'</code><b> бубликов</b></blockquote>'
+  won=g['payout']
+  text=header+' · <b>ПОБЕДА</b>\n\n<blockquote>'+details+'\n'+em('crown','👑')+' <b>Доступный выигрыш:</b> <code>'+fmt(won)+'</code> '+em('cherries','🍒')+'\n'+em('ok','✔️')+' <b>Результат:</b> <code>+'+fmt(won)+'</code> '+em('cherries','🍒')+'</blockquote>'
   return text,None
- text='<b>'+em('tower','🏯')+' Башня | Game On</b>\n\n<blockquote><b>👻 Кол-во мин: '+em('mine','💣')+'</b><code>'+str(count)+'</code><b>\n'+em('paper','🗒')+' Ставка: </b><code>'+fmt(g['bet'])+'</code><b> бубликов\n🎲 Можно забрать: </b><code>'+fmt(payout)+'</code><b> бубликов\n'+em('chart','📊')+' Коэффициент: </b><code>x'+tower_mult_text(count,floor)+'</code><b>\n'+em('shop','🏪')+' Этаж: </b><code>'+str(floor)+'/8</code></blockquote>'
+ text=header+' · <b>ИГРА</b>\n\n<blockquote>'+details+'\n'+em('money','💰')+' <b>Доступный выигрыш:</b> <code>'+fmt(payout)+'</code> '+em('cherries','🍒')+'</blockquote>'
  rows=[]
  # Telegram displays keyboard rows from top to bottom: highest/newest floor first.
  if floor<8:
@@ -892,8 +910,8 @@ def tower_view(g):
  for f in range(floor-1,-1,-1):
   row=[]
   for cell in range(5):
-   icon='green' if path[f]==cell else None
-   row.append(b(INVISIBLE if icon else '·',f'tw:{g["id"]}:{g["rev"]}:done',icon))
+   icon='diamond' if path[f]==cell else 'flag'
+   row.append(b(INVISIBLE,f'tw:{g["id"]}:{g["rev"]}:done',icon))
   rows.append(row)
  if floor: rows.append([b('Забрать выигрыш',f'tw:{g["id"]}:{g["rev"]}:cash','crown','primary')])
  return text,kb(rows)
